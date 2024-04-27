@@ -2,7 +2,10 @@
 Version 0.0.0
 - One-hour prototype DEMO version (ᓀ‸ᓂ)
 ```
-pip install opencv-python && pip install numpy && pip install pygetwindow && pip install pyautogui
+pip install opencv-python
+pip install numpy
+pip install pygetwindow
+pip install pyautogui
 ```
 
 ### [Usage]
