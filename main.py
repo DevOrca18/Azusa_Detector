@@ -107,9 +107,6 @@ def main():
             initial_rectangle, frame = detect_black_rectangle(frame)
 
         if initial_rectangle:
-            print("frame :: ", frame)
-            print("initial_rectangle :: ", initial_rectangle)
-            print("circle_radius :: ", circle_radius)
             # Draw circle
             circle_center, _ = draw_circle(frame, initial_rectangle, circle_radius)
 
