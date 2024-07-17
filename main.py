@@ -18,7 +18,6 @@ WHITE_THRESHOLD_HIGH = np.array([180, 25, 255])
 SOUND_FILE = "alert.wav"
 DEFAULT_RADIUS = 45
 
-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -35,7 +34,7 @@ class App(tk.Tk):
         self.window_combo['values'] = window_titles
         self.window_combo.pack(pady=5)
 
-        # Defualt Window :: OBS
+        # Default Window :: OBS
         obs_windows = [title for title in window_titles if "OBS" in title]
         if obs_windows:
             self.window_var.set(obs_windows[0])
@@ -51,7 +50,6 @@ class App(tk.Tk):
         self.destroy()  # Close the GUI window
         threading.Thread(target=main, args=(window_title, circle_radius)).start()
 
-
 def detect_black_rectangle(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY_INV)
@@ -65,13 +63,11 @@ def detect_black_rectangle(frame):
 
     return None, frame
 
-
 def draw_circle(frame, rect, circle_radius):
     x, y, w, h = rect
     circle_center = (x + w // 2, y + h // 2)
     cv2.circle(frame, circle_center, circle_radius, (0, 255, 255), 2)
     return circle_center
-
 
 def check_white_point_outside_circle(frame, rect, circle_center, circle_radius):
     x, y, w, h = rect
@@ -84,16 +80,21 @@ def check_white_point_outside_circle(frame, rect, circle_center, circle_radius):
     white_pixels = cv2.inRange(hsv, WHITE_THRESHOLD_LOW, WHITE_THRESHOLD_HIGH)
 
     outside_white_pixels = cv2.bitwise_and(white_pixels, cv2.bitwise_not(mask))
-    return np.any(outside_white_pixels)
 
+    white_points = cv2.findNonZero(outside_white_pixels)
+    if white_points is not None:
+        point = white_points[0][0]
+        return True, (point[0] + x, point[1] + y)
+    return False, None
 
-def play_alert_sound():
+def play_alert_sound(is_muted):
+    if is_muted:
+        return
     unique_alias = f"alert_sound_{time.time()}"
     windll.winmm.mciSendStringW(f"open {SOUND_FILE} alias {unique_alias}", None, 0, None)
     windll.winmm.mciSendStringW(f"play {unique_alias}", None, 0, None)
     time.sleep(1)
     windll.winmm.mciSendStringW(f"close {unique_alias}", None, 0, None)
-
 
 def capture_window(hwnd):
     left, top, right, bot = win32gui.GetClientRect(hwnd)
@@ -130,6 +131,7 @@ def main(window_title, circle_radius):
 
     initial_rectangle = None
     is_recording = False
+    is_muted = False
     record_data = []
     start_time = None
     was_outside = False
@@ -144,11 +146,10 @@ def main(window_title, circle_radius):
         if initial_rectangle:
             x, y, w, h = initial_rectangle
             circle_center = draw_circle(frame, initial_rectangle, circle_radius)
-            is_outside, white_point = check_white_point_outside_circle(frame, initial_rectangle, circle_center,
-                                                                       circle_radius)
+            is_outside, white_point = check_white_point_outside_circle(frame, initial_rectangle, circle_center, circle_radius)
 
             if is_outside and not was_outside:
-                threading.Thread(target=play_alert_sound).start()
+                threading.Thread(target=play_alert_sound, args=(is_muted,)).start()
                 print("(ᓀ‸ᓂ)")
 
             was_outside = is_outside
@@ -170,6 +171,9 @@ def main(window_title, circle_radius):
         else:
             cv2.putText(frame, "Recording: No", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
+        mute_color = (0, 0, 255) if is_muted else (255, 255, 255)
+        cv2.putText(frame, f"Muted: {'Yes' if is_muted else 'No'}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 1, mute_color, 2)
+
         cv2.imshow("Display", frame)
 
         key = cv2.waitKey(1) & 0xFF
@@ -187,27 +191,11 @@ def main(window_title, circle_radius):
             else:
                 is_recording = False
                 save_record_data(record_data, initial_rectangle)
+        elif key == ord('m'):
+            is_muted = not is_muted
+            print(f"Mute {'enabled' if is_muted else 'disabled'}")
 
     cv2.destroyAllWindows()
-
-
-def check_white_point_outside_circle(frame, rect, circle_center, circle_radius):
-    x, y, w, h = rect
-    roi = frame[y:y + h, x:x + w]
-
-    mask = np.zeros(roi.shape[:2], dtype=np.uint8)
-    cv2.circle(mask, (circle_center[0] - x, circle_center[1] - y), circle_radius, 255, -1)
-
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    white_pixels = cv2.inRange(hsv, WHITE_THRESHOLD_LOW, WHITE_THRESHOLD_HIGH)
-
-    outside_white_pixels = cv2.bitwise_and(white_pixels, cv2.bitwise_not(mask))
-
-    white_points = cv2.findNonZero(outside_white_pixels)
-    if white_points is not None:
-        point = white_points[0][0]
-        return True, (point[0] + x, point[1] + y)
-    return False, None
 
 def save_record_data(data, rectangle):
     folder_name = "azusa_record"

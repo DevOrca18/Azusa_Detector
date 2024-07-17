@@ -1,6 +1,7 @@
 # Azusa Detector (ᓀ‸ᓂ)
 Q : quit<br>
 R : record
+M : mute
 
 ## Version 0.0.1
 [24.07.17]<br>
