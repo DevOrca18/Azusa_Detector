@@ -18,18 +18,31 @@ WHITE_THRESHOLD_HIGH = np.array([180, 25, 255])
 SOUND_FILE = "alert.wav"
 DEFAULT_RADIUS = 45
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
+import tkinter as tk
+from tkinter import ttk, font
+import ttkthemes
 
-        self.title("Window Monitor")
-        self.geometry("300x200")
+class App(ttkthemes.ThemedTk):
+    def __init__(self):
+        super().__init__(theme="arc")
+
+        self.title("Azusa Detector")
+        self.geometry("400x350")
+
+        self.style = ttk.Style(self)
+        self.style.configure('TLabel', font=('Helvetica', 12))
+        self.style.configure('TButton', font=('Helvetica', 12))
 
         self.window_var = tk.StringVar()
         self.radius_var = tk.StringVar(value=str(DEFAULT_RADIUS))
 
-        ttk.Label(self, text="Select Window:").pack(pady=5)
-        self.window_combo = ttk.Combobox(self, textvariable=self.window_var)
+        main_frame = ttk.Frame(self, padding="20 20 20 20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text="Azusa Detector", font=('Helvetica', 18, 'bold')).pack(pady=10)
+
+        ttk.Label(main_frame, text="Select Window:").pack(pady=5)
+        self.window_combo = ttk.Combobox(main_frame, textvariable=self.window_var, width=30)
         window_titles = gw.getAllTitles()
         self.window_combo['values'] = window_titles
         self.window_combo.pack(pady=5)
@@ -39,16 +52,33 @@ class App(tk.Tk):
         if obs_windows:
             self.window_var.set(obs_windows[0])
 
-        ttk.Label(self, text="Circle Radius:").pack(pady=5)
-        ttk.Entry(self, textvariable=self.radius_var).pack(pady=5)
+        ttk.Label(main_frame, text="Circle Radius:").pack(pady=5)
+        radius_frame = ttk.Frame(main_frame)
+        radius_frame.pack(pady=5)
+        ttk.Entry(radius_frame, textvariable=self.radius_var, width=5).pack(side=tk.LEFT, padx=5)
+        ttk.Button(radius_frame, text="-", command=self.decrease_radius, width=2).pack(side=tk.LEFT)
+        ttk.Button(radius_frame, text="+", command=self.increase_radius, width=2).pack(side=tk.LEFT)
 
-        ttk.Button(self, text="Start", command=self.start_monitoring).pack(pady=20)
+        ttk.Button(main_frame, text="Start Monitoring", command=self.start_monitoring, style='Accent.TButton').pack(pady=20)
+
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(main_frame, textvariable=self.status_var, font=('Helvetica', 10, 'italic')).pack(pady=10)
+
+    def decrease_radius(self):
+        current = int(self.radius_var.get())
+        self.radius_var.set(str(max(1, current - 1)))
+
+    def increase_radius(self):
+        current = int(self.radius_var.get())
+        self.radius_var.set(str(current + 1))
 
     def start_monitoring(self):
         window_title = self.window_var.get()
         circle_radius = int(self.radius_var.get())
+        self.status_var.set("Monitoring started...")
         self.destroy()  # Close the GUI window
         threading.Thread(target=main, args=(window_title, circle_radius)).start()
+
 
 def detect_black_rectangle(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
