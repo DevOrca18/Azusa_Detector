@@ -1,13 +1,57 @@
-import threading
-from ctypes import windll
-
+import tkinter as tk
+from tkinter import ttk
 import cv2
 import numpy as np
 import pygetwindow as gw
-import pyautogui
+import mss
+import threading
+from ctypes import windll
 import time
+import os
+import win32gui
+import win32ui
+import csv
+from datetime import datetime
 
-# Initial analysis video area (Black Rectangular)
+WHITE_THRESHOLD_LOW = np.array([0, 0, 200])
+WHITE_THRESHOLD_HIGH = np.array([180, 25, 255])
+SOUND_FILE = "alert.wav"
+DEFAULT_RADIUS = 45
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Window Monitor")
+        self.geometry("300x200")
+
+        self.window_var = tk.StringVar()
+        self.radius_var = tk.StringVar(value=str(DEFAULT_RADIUS))
+
+        ttk.Label(self, text="Select Window:").pack(pady=5)
+        self.window_combo = ttk.Combobox(self, textvariable=self.window_var)
+        window_titles = gw.getAllTitles()
+        self.window_combo['values'] = window_titles
+        self.window_combo.pack(pady=5)
+
+        # Defualt Window :: OBS
+        obs_windows = [title for title in window_titles if "OBS" in title]
+        if obs_windows:
+            self.window_var.set(obs_windows[0])
+
+        ttk.Label(self, text="Circle Radius:").pack(pady=5)
+        ttk.Entry(self, textvariable=self.radius_var).pack(pady=5)
+
+        ttk.Button(self, text="Start", command=self.start_monitoring).pack(pady=20)
+
+    def start_monitoring(self):
+        window_title = self.window_var.get()
+        circle_radius = int(self.radius_var.get())
+        self.destroy()  # Close the GUI window
+        threading.Thread(target=main, args=(window_title, circle_radius)).start()
+
+
 def detect_black_rectangle(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY_INV)
@@ -17,112 +61,168 @@ def detect_black_rectangle(frame):
         max_contour = max(contours, key=cv2.contourArea)
         x, y, w, h = cv2.boundingRect(max_contour)
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-        return (x, y, w, h), frame # Save Coordinates
+        return (x, y, w, h), frame
 
     return None, frame
 
-# Draw Yellow Circle (Valid area)
+
 def draw_circle(frame, rect, circle_radius):
     x, y, w, h = rect
     circle_center = (x + w // 2, y + h // 2)
     cv2.circle(frame, circle_center, circle_radius, (0, 255, 255), 2)
+    return circle_center
 
-    return circle_center, circle_radius
 
-# Check if there are white points outside the circle and inside the black rectangle.
 def check_white_point_outside_circle(frame, rect, circle_center, circle_radius):
     x, y, w, h = rect
-    roi = frame[y:y + h, x:x + w]  # Area of the black rectangle
+    roi = frame[y:y + h, x:x + w]
 
-    # Detecting the inside of the circle using a mask
     mask = np.zeros(roi.shape[:2], dtype=np.uint8)
-    cv2.circle(mask, (circle_center[0] - x, circle_center[1] - y), circle_radius, (255, 255, 255), -1)  # Inside
+    cv2.circle(mask, (circle_center[0] - x, circle_center[1] - y), circle_radius, 255, -1)
 
-    # Detecting white pixels inside the black rectangle
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    lower_white = np.array([0, 0, 200])
-    upper_white = np.array([180, 25, 255])
-    white_pixels = cv2.inRange(hsv, lower_white, upper_white)
+    white_pixels = cv2.inRange(hsv, WHITE_THRESHOLD_LOW, WHITE_THRESHOLD_HIGH)
 
-    # Detecting white pixels outside the circle
-    outside_white_pixels = cv2.bitwise_and(white_pixels, cv2.bitwise_not(mask))  # White pixels outside the circle
-
-    # Check if white pixels are outside the circle and inside the black rectangle
-    if np.any(outside_white_pixels):
-        return True  # Return True if there are white points outside the circle
-    return False  # Return False if there are no white points outside the circle
+    outside_white_pixels = cv2.bitwise_and(white_pixels, cv2.bitwise_not(mask))
+    return np.any(outside_white_pixels)
 
 
-
-# Play Sound
 def play_alert_sound():
-    sound_file = "alert.wav"
     unique_alias = f"alert_sound_{time.time()}"
-
-    windll.winmm.mciSendStringW(f"open {sound_file} alias {unique_alias}", None, 0, None)
-    windll.winmm.mciSendStringW(f"play {sound_file}", None, 0, None)
-
+    windll.winmm.mciSendStringW(f"open {SOUND_FILE} alias {unique_alias}", None, 0, None)
+    windll.winmm.mciSendStringW(f"play {unique_alias}", None, 0, None)
     time.sleep(1)
     windll.winmm.mciSendStringW(f"close {unique_alias}", None, 0, None)
-def threaded_play_alert_sound():
-    sound_thread = threading.Thread(target=lambda: play_alert_sound())
-    sound_thread.start()
 
 
-def main():
-    open_windows = gw.getAllTitles()
+def capture_window(hwnd):
+    left, top, right, bot = win32gui.GetClientRect(hwnd)
+    width = right - left
+    height = bot - top
 
-    print("Windows List")
-    for i, window in enumerate(open_windows):
-        print(f"{i + 1}. {window}")
+    hwndDC = win32gui.GetWindowDC(hwnd)
+    mfcDC  = win32ui.CreateDCFromHandle(hwndDC)
+    saveDC = mfcDC.CreateCompatibleDC()
 
-    # Select window
-    choice = int(input("Select the window to monitor (enter the number) :"))
+    saveBitMap = win32ui.CreateBitmap()
+    saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
 
-    target_window_title = open_windows[choice - 1]
+    saveDC.SelectObject(saveBitMap)
 
-    while True:
-        target_windows = gw.getWindowsWithTitle(target_window_title)
-        if target_windows:
-            target_window = target_windows[0]
-            break
-        else:
-            print("Window not found. Please wait a moment.")
+    result = windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 3)
 
-    # Set circle size
-    circle_radius = int(input("Specify the circle radius (enter the number) : "))
+    bmpinfo = saveBitMap.GetInfo()
+    bmpstr = saveBitMap.GetBitmapBits(True)
+
+    img = np.frombuffer(bmpstr, dtype='uint8')
+    img.shape = (height, width, 4)
+
+    win32gui.DeleteObject(saveBitMap.GetHandle())
+    saveDC.DeleteDC()
+    mfcDC.DeleteDC()
+    win32gui.ReleaseDC(hwnd, hwndDC)
+
+    return img
+
+def main(window_title, circle_radius):
+    target_window = gw.getWindowsWithTitle(window_title)[0]
+    hwnd = win32gui.FindWindow(None, window_title)
+
     initial_rectangle = None
+    is_recording = False
+    record_data = []
+    start_time = None
+    was_outside = False
 
     while True:
-        screenshot = pyautogui.screenshot(
-            region=(target_window.left, target_window.top, target_window.width, target_window.height)
-        )
-
-        frame = np.array(screenshot)
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        screenshot = capture_window(hwnd)
+        frame = cv2.cvtColor(screenshot, cv2.COLOR_RGBA2BGR)
 
         if initial_rectangle is None:
-            # Black box
             initial_rectangle, frame = detect_black_rectangle(frame)
 
         if initial_rectangle:
-            # Draw circle
-            circle_center, _ = draw_circle(frame, initial_rectangle, circle_radius)
+            x, y, w, h = initial_rectangle
+            circle_center = draw_circle(frame, initial_rectangle, circle_radius)
+            is_outside, white_point = check_white_point_outside_circle(frame, initial_rectangle, circle_center,
+                                                                       circle_radius)
 
-            # Detect white dot
-            is_outside = check_white_point_outside_circle(frame, initial_rectangle, circle_center, circle_radius)
-
-            if is_outside:
-                threaded_play_alert_sound()
+            if is_outside and not was_outside:
+                threading.Thread(target=play_alert_sound).start()
                 print("(ᓀ‸ᓂ)")
+
+            was_outside = is_outside
+
+            if is_recording:
+                current_time = (datetime.now() - start_time).total_seconds()
+                if white_point:
+                    record_data.append([current_time, is_outside, white_point[0], white_point[1], w, h])
+                else:
+                    record_data.append([current_time, is_outside, None, None, w, h])
+
+        cv2.putText(frame, f"Circle Radius: {circle_radius}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        if is_recording:
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            minutes, seconds = divmod(int(elapsed_time), 60)
+            time_str = f"{minutes:02d}:{seconds:02d}"
+            cv2.putText(frame, f"Recording: Yes ({time_str})", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        else:
+            cv2.putText(frame, "Recording: No", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
         cv2.imshow("Display", frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break  # 'q' to quit
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('+') or key == ord('='):
+            circle_radius += 1
+        elif key == ord('-') or key == ord('_'):
+            circle_radius = max(1, circle_radius - 1)
+        elif key == ord('r'):
+            if not is_recording:
+                is_recording = True
+                start_time = datetime.now()
+                record_data.clear()
+            else:
+                is_recording = False
+                save_record_data(record_data, initial_rectangle)
 
-    cv2.destroyAllWindows()  # OpenCV close
+    cv2.destroyAllWindows()
+
+
+def check_white_point_outside_circle(frame, rect, circle_center, circle_radius):
+    x, y, w, h = rect
+    roi = frame[y:y + h, x:x + w]
+
+    mask = np.zeros(roi.shape[:2], dtype=np.uint8)
+    cv2.circle(mask, (circle_center[0] - x, circle_center[1] - y), circle_radius, 255, -1)
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    white_pixels = cv2.inRange(hsv, WHITE_THRESHOLD_LOW, WHITE_THRESHOLD_HIGH)
+
+    outside_white_pixels = cv2.bitwise_and(white_pixels, cv2.bitwise_not(mask))
+
+    white_points = cv2.findNonZero(outside_white_pixels)
+    if white_points is not None:
+        point = white_points[0][0]
+        return True, (point[0] + x, point[1] + y)
+    return False, None
+
+def save_record_data(data, rectangle):
+    folder_name = "azusa_record"
+    os.makedirs(folder_name, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(folder_name, f"record_{timestamp}.csv")
+
+    with open(filename, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Rectangle Size", f"{rectangle[2]}x{rectangle[3]}"])
+        writer.writerow(["Time (s)", "Is Outside", "X", "Y", "Rectangle Width", "Rectangle Height"])
+        writer.writerows(data)
+    print(f"Record saved to {filename}")
 
 if __name__ == "__main__":
-    main()
+    app = App()
+    app.mainloop()
