@@ -12,6 +12,16 @@ import win32gui
 import win32ui
 import csv
 from datetime import datetime
+import win32gui
+import win32con
+
+# 콘솔 창 숨기기
+def hide_console():
+    console_window = win32gui.GetForegroundWindow()
+    win32gui.ShowWindow(console_window, win32con.SW_HIDE)
+
+# 메인 코드 시작 전에 호출
+hide_console()
 
 WHITE_THRESHOLD_LOW = np.array([0, 0, 200])
 WHITE_THRESHOLD_HIGH = np.array([180, 25, 255])

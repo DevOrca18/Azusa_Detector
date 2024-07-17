@@ -1,7 +1,9 @@
 # Azusa Detector (ᓀ‸ᓂ)
 Q : quit<br>
-R : record
+R : record<br>
 M : mute
+
+pyinstaller --onefile --noconsole --add-data "alert.wav;." main.py
 
 ## Version 0.0.1
 [24.07.17]<br>
