@@ -4,7 +4,7 @@ R : record<br>
 M : mute
 
 pyinstaller --onefile --noconsole --add-data "alert.wav;." main.py
-
+> pyinstaller --onefile --add-data "alert.wav;." main.py
 ## Version 0.0.1
 [24.07.17]<br>
 Library and threading usage has been changed.<br>
