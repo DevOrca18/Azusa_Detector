@@ -14,6 +14,7 @@ import csv
 from datetime import datetime
 import win32gui
 import win32con
+import sys
 
 # 콘솔 창 숨기기
 def hide_console():
@@ -25,8 +26,20 @@ hide_console()
 
 WHITE_THRESHOLD_LOW = np.array([0, 0, 200])
 WHITE_THRESHOLD_HIGH = np.array([180, 25, 255])
-SOUND_FILE = "alert.wav"
 DEFAULT_RADIUS = 45
+
+# 리소스 경로를 가져오는 함수 추가
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+# SOUND_FILE 변수를 수정
+SOUND_FILE = resource_path("alert.wav")
 
 import tkinter as tk
 from tkinter import ttk, font
@@ -89,7 +102,6 @@ class App(ttkthemes.ThemedTk):
         self.destroy()  # Close the GUI window
         threading.Thread(target=main, args=(window_title, circle_radius)).start()
 
-
 def detect_black_rectangle(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY_INV)
@@ -130,6 +142,8 @@ def check_white_point_outside_circle(frame, rect, circle_center, circle_radius):
 def play_alert_sound(is_muted):
     if is_muted:
         return
+    print(f"Attempting to play sound file: {SOUND_FILE}")  # 디버깅용 출력
+    print(f"Sound file exists: {os.path.exists(SOUND_FILE)}")  # 파일 존재 여부 확인
     unique_alias = f"alert_sound_{time.time()}"
     windll.winmm.mciSendStringW(f"open {SOUND_FILE} alias {unique_alias}", None, 0, None)
     windll.winmm.mciSendStringW(f"play {unique_alias}", None, 0, None)
