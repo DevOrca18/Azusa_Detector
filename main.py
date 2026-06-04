@@ -40,6 +40,9 @@ DEFAULT_CONFIG = {
 DIGIT_CANDIDATE_SCORE_MIN = 0.25
 RESULT_OVERLAY_SEC = 3.0
 STATUS_OVERLAY_SEC = 2.0
+DISPLAY_WINDOW_NAME = "Display"
+DISPLAY_MAX_WIDTH = 1280
+DISPLAY_MAX_HEIGHT = 820
 
 if getattr(sys, "frozen", False):
     APP_BASE_DIR = os.path.dirname(sys.executable)
@@ -1234,6 +1237,13 @@ def set_status(message):
     return message, time.time() + STATUS_OVERLAY_SEC
 
 
+def initialize_display_window(frame):
+    cv2.namedWindow(DISPLAY_WINDOW_NAME, cv2.WINDOW_NORMAL)
+    height, width = frame.shape[:2]
+    scale = min(DISPLAY_MAX_WIDTH / width, DISPLAY_MAX_HEIGHT / height, 1.0)
+    cv2.resizeWindow(DISPLAY_WINDOW_NAME, max(320, int(width * scale)), max(240, int(height * scale)))
+
+
 def main(window_title, config):
     windows = gw.getWindowsWithTitle(window_title)
     if not windows:
@@ -1257,6 +1267,7 @@ def main(window_title, config):
     result_overlay_until = 0.0
     status_message = ""
     status_message_until = 0.0
+    display_window_initialized = False
 
     while True:
         now = time.time()
@@ -1326,7 +1337,11 @@ def main(window_title, config):
         if time.time() < result_overlay_until:
             draw_result_card(frame, last_result)
 
-        cv2.imshow("Display", frame)
+        if not display_window_initialized:
+            initialize_display_window(frame)
+            display_window_initialized = True
+
+        cv2.imshow(DISPLAY_WINDOW_NAME, frame)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
