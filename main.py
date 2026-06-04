@@ -1050,6 +1050,82 @@ def draw_badge(frame, x, y, text, bg_color, fg_color=(245, 248, 252), scale=0.48
     return x2
 
 
+def draw_keycap(frame, x, y, key, width, height, accent_color):
+    draw_alpha_rect(frame, x, y, x + width, y + height, (42, 49, 60), 0.94)
+    cv2.rectangle(frame, (int(x), int(y)), (int(x + width), int(y + height)), accent_color, 1)
+    text_scale = fit_text_scale(key, width - 8, 0.44, 0.32, 1)
+    text_size, baseline = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, text_scale, 1)
+    text_x = x + (width - text_size[0]) / 2
+    text_y = y + (height + text_size[1]) / 2 - 2
+    draw_text(frame, key, text_x, text_y, text_scale, (248, 250, 252), 1)
+
+
+def draw_shortcut_guide(frame, margin):
+    height, width = frame.shape[:2]
+    controls = [
+        ("Q", "Quit"),
+        ("R", "Record on/off"),
+        ("M", "Mute"),
+        ("+/-", "Radius"),
+        ("C", "Save timer ROI"),
+    ]
+
+    bg = (18, 22, 28)
+    border = (68, 80, 96)
+    accent = (255, 199, 82)
+    muted = (156, 168, 184)
+    text = (232, 238, 244)
+    max_w = width - margin * 2
+    key_scale = 0.44
+    label_scale = 0.45
+    item_gap = 16
+    row_gap = 8
+    row_h = 26
+    title_h = 25
+
+    items = []
+    for key, label in controls:
+        key_w = max(32, text_width(key, key_scale, 1) + 18)
+        label_w = text_width(label, label_scale, 1)
+        items.append((key, label, key_w, label_w, key_w + label_w + 8))
+
+    rows = [[]]
+    current_w = 0
+    for item in items:
+        item_w = item[4]
+        next_w = item_w if not rows[-1] else current_w + item_gap + item_w
+        if rows[-1] and next_w > max_w - 28:
+            rows.append([item])
+            current_w = item_w
+        else:
+            rows[-1].append(item)
+            current_w = next_w
+
+    content_w = max(
+        min(max_w - 28, sum(item[4] for item in row) + item_gap * max(0, len(row) - 1))
+        for row in rows
+    )
+    guide_w = min(max_w, content_w + 28)
+    guide_h = title_h + len(rows) * row_h + max(0, len(rows) - 1) * row_gap + 16
+    x1 = margin
+    y1 = max(margin, height - margin - guide_h)
+    x2 = x1 + guide_w
+    y2 = y1 + guide_h
+
+    draw_alpha_rect(frame, x1, y1, x2, y2, bg, 0.82)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), border, 1)
+    draw_text(frame, "CONTROLS", x1 + 14, y1 + 20, 0.42, muted, 1)
+
+    row_y = y1 + title_h + 6
+    for row in rows:
+        cursor_x = x1 + 14
+        for key, label, key_w, label_w, item_w in row:
+            draw_keycap(frame, cursor_x, row_y, key, key_w, 22, accent)
+            draw_text(frame, label, cursor_x + key_w + 8, row_y + 16, label_scale, text, 1)
+            cursor_x += item_w + item_gap
+        row_y += row_h + row_gap
+
+
 def draw_result_card(frame, result):
     if result is None:
         return
@@ -1151,16 +1227,7 @@ def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds,
         status_scale = fit_text_scale(status_message, panel_w - 28, 0.48, 0.36)
         draw_text(frame, status_message, x1 + 14, y1 + 125, status_scale, accent, 1)
 
-    shortcuts = "Q Quit   R Record   M Mute   +/- Radius   C Timer ROI"
-    scale = fit_text_scale(shortcuts, width - margin * 2 - 24, 0.48, 0.36)
-    strip_w = min(width - margin * 2, text_width(shortcuts, scale, 1) + 28)
-    strip_h = 34
-    strip_x = margin
-    strip_y = max(y2 + 8, height - margin - strip_h)
-    if strip_y + strip_h < height:
-        draw_alpha_rect(frame, strip_x, strip_y, strip_x + strip_w, strip_y + strip_h, bg, 0.68)
-        cv2.rectangle(frame, (strip_x, strip_y), (strip_x + strip_w, strip_y + strip_h), border, 1)
-        draw_text(frame, shortcuts, strip_x + 14, strip_y + 22, scale, muted, 1)
+    draw_shortcut_guide(frame, margin)
 
 
 def set_status(message):
