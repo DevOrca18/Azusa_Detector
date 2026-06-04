@@ -41,6 +41,11 @@ DIGIT_CANDIDATE_SCORE_MIN = 0.25
 RESULT_OVERLAY_SEC = 3.0
 STATUS_OVERLAY_SEC = 2.0
 
+if getattr(sys, "frozen", False):
+    APP_BASE_DIR = os.path.dirname(sys.executable)
+else:
+    APP_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 def hide_console():
     try:
@@ -51,9 +56,7 @@ def hide_console():
 
 
 def app_base_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    return APP_BASE_DIR
 
 
 def resource_path(relative_path):
@@ -260,17 +263,19 @@ def load_config():
 
 class App(ttkthemes.ThemedTk):
     def __init__(self, config, config_warnings):
-        super().__init__(theme="arc")
+        super().__init__(theme="equilux")
 
         self.config_data = config
         self.config_warnings = config_warnings
 
         self.title("Azusa Detector")
-        self.geometry("430x500")
+        self.geometry("480x460")
+        self.minsize(460, 450)
+        self.resizable(True, True)
 
+        self.configure(background="#20242b")
         self.style = ttk.Style(self)
-        self.style.configure("TLabel", font=("Helvetica", 11))
-        self.style.configure("TButton", font=("Helvetica", 11))
+        self.configure_styles()
 
         self.window_var = tk.StringVar()
         self.radius_var = tk.StringVar(value=str(config["detect"]["circle_radius"]))
@@ -279,50 +284,169 @@ class App(ttkthemes.ThemedTk):
         self.auto_enabled_var = tk.BooleanVar(value=config["auto"]["enabled"])
         self.status_var = tk.StringVar(value="Ready")
 
-        main_frame = ttk.Frame(self, padding="20 20 20 20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = ttk.Frame(self, padding=(18, 16, 18, 14), style="App.TFrame")
+        main_frame.grid(row=0, column=0, sticky=tk.NSEW)
+        main_frame.columnconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        ttk.Label(main_frame, text="Azusa Detector", font=("Helvetica", 18, "bold")).pack(pady=10)
+        ttk.Label(main_frame, text="Azusa Detector", style="Title.TLabel").grid(
+            row=0, column=0, sticky=tk.W, pady=(0, 14)
+        )
 
-        ttk.Label(main_frame, text="Select Window:").pack(pady=5)
-        window_frame = ttk.Frame(main_frame)
-        window_frame.pack(fill=tk.X, pady=5)
-        self.window_combo = ttk.Combobox(window_frame, textvariable=self.window_var, width=30)
-        self.window_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Button(window_frame, text="Refresh", command=self.refresh_windows, width=9).pack(side=tk.LEFT)
+        window_section = ttk.LabelFrame(main_frame, text="Window", style="Section.TLabelframe")
+        window_section.grid(row=1, column=0, sticky=tk.EW)
+        window_section.columnconfigure(0, weight=1)
+        self.window_combo = ttk.Combobox(window_section, textvariable=self.window_var, state="readonly")
+        self.window_combo.grid(row=0, column=0, sticky=tk.EW, padx=(12, 8), pady=12)
+        ttk.Button(window_section, text="Refresh", command=self.refresh_windows, width=10).grid(
+            row=0, column=1, sticky=tk.E, padx=(0, 12), pady=12
+        )
         self.refresh_windows(update_status=False)
 
-        ttk.Label(main_frame, text="Circle Radius:").pack(pady=(14, 5))
-        radius_frame = ttk.Frame(main_frame)
-        radius_frame.pack(pady=5)
-        ttk.Entry(radius_frame, textvariable=self.radius_var, width=7).pack(side=tk.LEFT, padx=5)
-        ttk.Button(radius_frame, text="-", command=self.decrease_radius, width=3).pack(side=tk.LEFT)
-        ttk.Button(radius_frame, text="+", command=self.increase_radius, width=3).pack(side=tk.LEFT)
-
-        grading_frame = ttk.LabelFrame(main_frame, text="Grading")
-        grading_frame.pack(fill=tk.X, pady=(14, 5))
-        ttk.Label(grading_frame, text="GOOD max").grid(row=0, column=0, sticky=tk.W, padx=10, pady=6)
-        ttk.Entry(grading_frame, textvariable=self.good_var, width=10).grid(row=0, column=1, sticky=tk.W, padx=10, pady=6)
-        ttk.Label(grading_frame, text="SOSO max").grid(row=1, column=0, sticky=tk.W, padx=10, pady=6)
-        ttk.Entry(grading_frame, textvariable=self.soso_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=10, pady=6)
-
-        auto_frame = ttk.LabelFrame(main_frame, text="Auto Timer")
-        auto_frame.pack(fill=tk.X, pady=(10, 5))
-        ttk.Checkbutton(auto_frame, text="Enable auto start/finish", variable=self.auto_enabled_var).pack(
-            anchor=tk.W, padx=10, pady=8
+        detect_section = ttk.LabelFrame(main_frame, text="Detection", style="Section.TLabelframe")
+        detect_section.grid(row=2, column=0, sticky=tk.EW, pady=(12, 0))
+        detect_section.columnconfigure(1, weight=1)
+        ttk.Label(detect_section, text="Circle radius", style="Section.TLabel").grid(
+            row=0, column=0, sticky=tk.W, padx=(12, 10), pady=12
+        )
+        ttk.Entry(detect_section, textvariable=self.radius_var, width=8, justify=tk.CENTER).grid(
+            row=0, column=1, sticky=tk.W, pady=12
+        )
+        ttk.Button(detect_section, text="-", command=self.decrease_radius, width=3).grid(
+            row=0, column=2, padx=(8, 4), pady=12
+        )
+        ttk.Button(detect_section, text="+", command=self.increase_radius, width=3).grid(
+            row=0, column=3, padx=(0, 12), pady=12
         )
 
-        ttk.Button(main_frame, text="Start Monitoring", command=self.start_monitoring, style="Accent.TButton").pack(
-            pady=20
+        grading_section = ttk.LabelFrame(main_frame, text="Grading", style="Section.TLabelframe")
+        grading_section.grid(row=3, column=0, sticky=tk.EW, pady=(12, 0))
+        grading_section.columnconfigure(1, weight=1)
+        grading_section.columnconfigure(3, weight=1)
+        ttk.Label(grading_section, text="GOOD max", style="Section.TLabel").grid(
+            row=0, column=0, sticky=tk.W, padx=(12, 8), pady=12
+        )
+        ttk.Entry(grading_section, textvariable=self.good_var, width=10, justify=tk.CENTER).grid(
+            row=0, column=1, sticky=tk.W, pady=12
+        )
+        ttk.Label(grading_section, text="SOSO max", style="Section.TLabel").grid(
+            row=0, column=2, sticky=tk.W, padx=(18, 8), pady=12
+        )
+        ttk.Entry(grading_section, textvariable=self.soso_var, width=10, justify=tk.CENTER).grid(
+            row=0, column=3, sticky=tk.W, padx=(0, 12), pady=12
         )
 
-        ttk.Label(main_frame, textvariable=self.status_var, font=("Helvetica", 10, "italic")).pack(pady=10)
+        auto_section = ttk.LabelFrame(main_frame, text="Auto Timer", style="Section.TLabelframe")
+        auto_section.grid(row=4, column=0, sticky=tk.EW, pady=(12, 0))
+        ttk.Checkbutton(auto_section, text="Enable auto start/finish", variable=self.auto_enabled_var).grid(
+            row=0, column=0, sticky=tk.W, padx=12, pady=12
+        )
+
+        ttk.Button(main_frame, text="Start Monitoring", command=self.start_monitoring, style="Primary.TButton").grid(
+            row=5, column=0, sticky=tk.EW, pady=(16, 8), ipady=4
+        )
+
+        ttk.Label(main_frame, textvariable=self.status_var, style="Status.TLabel").grid(row=6, column=0, sticky=tk.W)
+
+        self.bind("<F5>", self.handle_refresh_shortcut)
+        self.bind("<Control-r>", self.handle_refresh_shortcut)
+        self.bind("<Control-R>", self.handle_refresh_shortcut)
 
         if self.config_warnings:
             self.after(250, self.show_config_warnings)
 
+    def configure_styles(self):
+        bg = "#20242b"
+        panel = "#292f38"
+        panel_border = "#3a414d"
+        text = "#e6eaf0"
+        muted = "#aab3c2"
+        accent = "#57c7ff"
+        accent_active = "#74d2ff"
+        field = "#171b21"
+
+        self.option_add("*Font", ("Segoe UI", 10))
+        self.option_add("*TCombobox*Listbox.background", field)
+        self.option_add("*TCombobox*Listbox.foreground", text)
+        self.option_add("*TCombobox*Listbox.selectBackground", "#2f6f95")
+        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+
+        self.style.configure(".", font=("Segoe UI", 10), background=bg, foreground=text)
+        self.style.configure("App.TFrame", background=bg)
+        self.style.configure("TLabel", background=bg, foreground=text)
+        self.style.configure("Section.TLabel", background=panel, foreground=text)
+        self.style.configure("Title.TLabel", background=bg, foreground="#ffffff", font=("Segoe UI", 18, "bold"))
+        self.style.configure("Status.TLabel", background=bg, foreground=muted, font=("Segoe UI", 9))
+
+        self.style.configure(
+            "Section.TLabelframe",
+            background=panel,
+            bordercolor=panel_border,
+            relief=tk.SOLID,
+        )
+        self.style.configure(
+            "Section.TLabelframe.Label",
+            background=bg,
+            foreground=muted,
+            font=("Segoe UI", 10, "bold"),
+        )
+        self.style.configure("TCheckbutton", background=panel, foreground=text)
+        self.style.map("TCheckbutton", background=[("active", panel)], foreground=[("disabled", "#707782")])
+
+        self.style.configure(
+            "TEntry",
+            fieldbackground=field,
+            foreground=text,
+            insertcolor=text,
+            bordercolor=panel_border,
+            lightcolor=panel_border,
+            darkcolor=panel_border,
+        )
+        self.style.configure(
+            "TCombobox",
+            fieldbackground=field,
+            background=field,
+            foreground=text,
+            arrowcolor=muted,
+            bordercolor=panel_border,
+            lightcolor=panel_border,
+            darkcolor=panel_border,
+        )
+        self.style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", field), ("focus", field)],
+            foreground=[("readonly", text)],
+            selectbackground=[("readonly", field)],
+            selectforeground=[("readonly", text)],
+        )
+
+        self.style.configure("TButton", background="#343b46", foreground=text, bordercolor="#444c59", padding=(10, 5))
+        self.style.map(
+            "TButton",
+            background=[("active", "#3d4653"), ("pressed", "#2b313b")],
+            foreground=[("disabled", "#777f8b")],
+        )
+        self.style.configure(
+            "Primary.TButton",
+            background=accent,
+            foreground="#10151b",
+            bordercolor=accent,
+            font=("Segoe UI", 11, "bold"),
+            padding=(12, 7),
+        )
+        self.style.map(
+            "Primary.TButton",
+            background=[("active", accent_active), ("pressed", "#40b7ee")],
+            foreground=[("active", "#10151b"), ("pressed", "#10151b")],
+        )
+
     def show_config_warnings(self):
         messagebox.showwarning("Azusa Detector config", "\n".join(self.config_warnings))
+
+    def handle_refresh_shortcut(self, event=None):
+        self.refresh_windows()
+        return "break"
 
     def refresh_windows(self, update_status=True):
         previous_title = self.window_var.get()
@@ -374,7 +498,7 @@ class App(ttkthemes.ThemedTk):
         save_config(validated_config)
         self.status_var.set("Monitoring started...")
         self.destroy()
-        threading.Thread(target=main, args=(window_title, validated_config)).start()
+        main(window_title, validated_config)
 
 
 def detect_black_rectangle(frame):
@@ -462,7 +586,12 @@ def seconds_from_digits(digits):
     digits = "".join(char for char in digits if char.isdigit())
     if not digits:
         return None
-    value = int(digits[-2:]) if len(digits) >= 2 else int(digits)
+    if len(digits) == 3 and digits[0] in ("0", "1"):
+        value = int(digits[2])
+    elif len(digits) >= 4:
+        value = int(digits[-2:])
+    else:
+        value = int(digits[-2:]) if len(digits) >= 2 else int(digits)
     if 0 <= value <= 59:
         return value
     return None
@@ -575,16 +704,16 @@ class TimerDetector:
     @staticmethod
     def find_digit_boxes(binary):
         roi_h, roi_w = binary.shape[:2]
-        min_h = max(12, int(roi_h * 0.18))
+        min_h = max(6, int(roi_h * 0.18))
         max_h = max(min_h, int(roi_h * 0.65))
-        max_w = max(8, int(roi_w * 0.25))
+        max_w = max(5, int(roi_w * 0.25))
         min_y = int(roi_h * 0.35)
 
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
         boxes = []
         for label in range(1, num_labels):
             x, y, w, h, area = stats[label]
-            if y >= min_y and min_h <= h <= max_h and 2 <= w <= max_w and area >= 20:
+            if y >= min_y and min_h <= h <= max_h and 2 <= w <= max_w and area >= 8:
                 boxes.append((int(x), int(y), int(w), int(h)))
         boxes.sort(key=lambda item: item[0])
         return boxes
@@ -878,70 +1007,160 @@ def save_timer_calibration(frame, rectangle, timer_detector):
     return None
 
 
+def draw_alpha_rect(frame, x1, y1, x2, y2, color, alpha=0.72):
+    height, width = frame.shape[:2]
+    x1 = max(0, min(width - 1, int(x1)))
+    y1 = max(0, min(height - 1, int(y1)))
+    x2 = max(0, min(width, int(x2)))
+    y2 = max(0, min(height, int(y2)))
+    if x2 <= x1 or y2 <= y1:
+        return
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+
+def draw_text(frame, text, x, y, scale=0.55, color=(235, 240, 245), thickness=1):
+    cv2.putText(frame, text, (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+
+
+def text_width(text, scale=0.55, thickness=1):
+    size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    return size[0]
+
+
+def fit_text_scale(text, max_width, preferred_scale=0.55, min_scale=0.38, thickness=1):
+    scale = preferred_scale
+    while scale > min_scale and text_width(text, scale, thickness) > max_width:
+        scale -= 0.03
+    return max(min_scale, scale)
+
+
+def draw_badge(frame, x, y, text, bg_color, fg_color=(245, 248, 252), scale=0.48):
+    pad_x = 9
+    pad_y = 5
+    label_w = text_width(text, scale, 1)
+    label_h = 18
+    x2 = int(x + label_w + pad_x * 2)
+    y2 = int(y + label_h + pad_y * 2)
+    draw_alpha_rect(frame, x, y, x2, y2, bg_color, 0.88)
+    cv2.rectangle(frame, (int(x), int(y)), (x2, y2), tuple(min(255, c + 36) for c in bg_color), 1)
+    draw_text(frame, text, x + pad_x, y + pad_y + 14, scale, fg_color, 1)
+    return x2
+
+
 def draw_result_card(frame, result):
     if result is None:
         return
 
     grade = result["grade"]
     ratio_text = f"{result['outside_ratio'] * 100:.1f}%"
-    title = f"{grade} - outside {ratio_text} ({result['outside_frames']}/{result['total_frames']} frames)"
-    subtitle = f"beeps {result['beep_count']} | max outside {result['max_outside_s']:.2f}s"
+    title = f"{grade}"
+    detail = f"outside {ratio_text}  |  {result['outside_frames']}/{result['total_frames']} frames"
+    extra = f"beeps {result['beep_count']}  |  max outside {result['max_outside_s']:.2f}s"
 
     grade_colors = {
-        "GOOD": (40, 180, 90),
-        "SOSO": (0, 190, 230),
-        "BAD": (40, 80, 230),
+        "GOOD": (92, 220, 126),
+        "SOSO": (64, 202, 255),
+        "BAD": (86, 118, 255),
     }
-    color = grade_colors.get(grade, (255, 255, 255))
+    accent = grade_colors.get(grade, (230, 230, 230))
 
     height, width = frame.shape[:2]
-    card_w = min(width - 40, 680)
-    card_h = 120
-    x1 = max(20, (width - card_w) // 2)
-    y1 = 30
+    margin = max(14, int(min(width, height) * 0.018))
+    card_w = min(max(360, width // 2), width - margin * 2)
+    card_h = 132
+    x1 = max(margin, (width - card_w) // 2)
+    y1 = margin
     x2 = x1 + card_w
     y2 = y1 + card_h
 
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x1, y1), (x2, y2), (25, 25, 25), -1)
-    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 3)
-    cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
-    cv2.putText(frame, title, (x1 + 22, y1 + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.85, color, 2)
-    cv2.putText(frame, subtitle, (x1 + 22, y1 + 88), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (235, 235, 235), 2)
+    draw_alpha_rect(frame, x1, y1, x2, y2, (18, 22, 28), 0.88)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 82, 98), 1)
+    cv2.rectangle(frame, (x1, y1), (x1 + 6, y2), accent, -1)
+    draw_text(frame, title, x1 + 24, y1 + 45, 1.1, accent, 2)
+    draw_text(frame, detail, x1 + 24, y1 + 78, 0.62, (238, 242, 246), 1)
+    draw_text(frame, extra, x1 + 24, y1 + 108, 0.52, (170, 180, 192), 1)
 
 
 def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds, timer_method, status_message):
-    cv2.putText(frame, f"Circle Radius: {circle_radius}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    height, width = frame.shape[:2]
+    margin = max(12, int(min(width, height) * 0.014))
+    panel_w = min(max(330, int(width * 0.28)), width - margin * 2)
+    panel_h = 132 if not status_message else 158
+    x1 = margin
+    y1 = margin
+    x2 = x1 + panel_w
+    y2 = y1 + panel_h
+
+    bg = (18, 22, 28)
+    border = (68, 80, 96)
+    text = (235, 240, 245)
+    muted = (156, 168, 184)
+    accent = (255, 199, 82)
+    red = (72, 94, 232)
+    green = (92, 210, 126)
+    blue = (255, 176, 74)
+    gray = (86, 94, 106)
+
+    draw_alpha_rect(frame, x1, y1, x2, y2, bg, 0.78)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), border, 1)
+    draw_text(frame, "AZUSA DETECTOR", x1 + 14, y1 + 24, 0.48, muted, 1)
 
     if session is not None:
         elapsed_time = (datetime.now() - session.start_time).total_seconds()
         minutes, seconds = divmod(int(elapsed_time), 60)
-        time_str = f"{minutes:02d}:{seconds:02d}"
-        cv2.putText(
-            frame,
-            f"Recording: Yes ({time_str}, {session.source})",
-            (10, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 255),
-            2,
-        )
+        rec_text = f"REC {minutes:02d}:{seconds:02d} {session.source.upper()}"
+        rec_color = red
     else:
-        cv2.putText(frame, "Recording: No", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        rec_text = "IDLE"
+        rec_color = gray
 
-    mute_color = (0, 0, 255) if is_muted else (255, 255, 255)
-    cv2.putText(frame, f"Muted: {'Yes' if is_muted else 'No'}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 1, mute_color, 2)
-    cv2.putText(frame, auto_label, (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (180, 230, 255), 2)
-
-    timer_text = "Timer: --"
+    timer_text = "--"
     if timer_seconds is not None:
-        timer_text = f"Timer: 00:{timer_seconds:02d}"
-        if timer_method:
-            timer_text += f" ({timer_method})"
-    cv2.putText(frame, timer_text, (10, 185), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (220, 220, 220), 2)
+        timer_text = f"00:{timer_seconds:02d}"
+    if timer_method:
+        timer_text = f"{timer_text} {timer_method.upper()}"
+
+    auto_text = auto_label.replace("AUTO:", "AUTO").strip()
+    auto_color = blue
+    if "OFF" in auto_text:
+        auto_color = gray
+    elif "DONE" in auto_text:
+        auto_color = green
+    elif "REC" in auto_text:
+        auto_color = red
+
+    badge_y = y1 + 39
+    next_x = draw_badge(frame, x1 + 14, badge_y, rec_text, rec_color)
+    if next_x + 118 < x2:
+        next_x = draw_badge(frame, next_x + 8, badge_y, auto_text, auto_color)
+    if next_x + 94 < x2:
+        draw_badge(frame, next_x + 8, badge_y, timer_text, (52, 62, 74))
+
+    row_y = y1 + 92
+    draw_text(frame, f"Radius {circle_radius}", x1 + 14, row_y, 0.52, text, 1)
+    mute_label = "Muted ON" if is_muted else "Muted OFF"
+    mute_color = (80, 96, 230) if is_muted else muted
+    draw_text(frame, mute_label, x1 + 130, row_y, 0.52, mute_color, 1)
+    if timer_seconds is None:
+        draw_text(frame, "Timer --", x1 + 246, row_y, 0.52, muted, 1)
 
     if status_message:
-        cv2.putText(frame, status_message, (10, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 220, 255), 2)
+        status_scale = fit_text_scale(status_message, panel_w - 28, 0.48, 0.36)
+        draw_text(frame, status_message, x1 + 14, y1 + 125, status_scale, accent, 1)
+
+    shortcuts = "Q Quit   R Record   M Mute   +/- Radius   C Timer ROI"
+    scale = fit_text_scale(shortcuts, width - margin * 2 - 24, 0.48, 0.36)
+    strip_w = min(width - margin * 2, text_width(shortcuts, scale, 1) + 28)
+    strip_h = 34
+    strip_x = margin
+    strip_y = max(y2 + 8, height - margin - strip_h)
+    if strip_y + strip_h < height:
+        draw_alpha_rect(frame, strip_x, strip_y, strip_x + strip_w, strip_y + strip_h, bg, 0.68)
+        cv2.rectangle(frame, (strip_x, strip_y), (strip_x + strip_w, strip_y + strip_h), border, 1)
+        draw_text(frame, shortcuts, strip_x + 14, strip_y + 22, scale, muted, 1)
 
 
 def set_status(message):
@@ -984,13 +1203,13 @@ def main(window_title, config):
             initial_rectangle, frame = detect_black_rectangle(frame)
         elif initial_rectangle:
             x, y, w, h = initial_rectangle
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (88, 178, 118), 1)
 
         if initial_rectangle:
             timer_seconds, timer_roi_rect, timer_method = timer_detector.read_seconds(raw_frame, initial_rectangle, now)
             if timer_roi_rect:
                 rx, ry, rw, rh = timer_roi_rect
-                cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), (255, 180, 0), 1)
+                cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), (255, 178, 74), 1)
 
             if auto_state.maybe_start(timer_seconds, now, session is not None):
                 session = SessionRecorder(config, "auto")
