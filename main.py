@@ -238,7 +238,7 @@ def load_config():
     created = not os.path.exists(CONFIG_FILE)
     if created:
         config = deepcopy(DEFAULT_CONFIG)
-        warnings = [f"Created default config: {CONFIG_FILE}"]
+        warnings = []
     else:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as file:
@@ -277,6 +277,7 @@ class App(ttkthemes.ThemedTk):
         self.good_var = tk.StringVar(value=str(config["grading"]["good_max"]))
         self.soso_var = tk.StringVar(value=str(config["grading"]["soso_max"]))
         self.auto_enabled_var = tk.BooleanVar(value=config["auto"]["enabled"])
+        self.status_var = tk.StringVar(value="Ready")
 
         main_frame = ttk.Frame(self, padding="20 20 20 20")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -284,14 +285,12 @@ class App(ttkthemes.ThemedTk):
         ttk.Label(main_frame, text="Azusa Detector", font=("Helvetica", 18, "bold")).pack(pady=10)
 
         ttk.Label(main_frame, text="Select Window:").pack(pady=5)
-        self.window_combo = ttk.Combobox(main_frame, textvariable=self.window_var, width=35)
-        window_titles = gw.getAllTitles()
-        self.window_combo["values"] = window_titles
-        self.window_combo.pack(pady=5)
-
-        obs_windows = [title for title in window_titles if "OBS" in title]
-        if obs_windows:
-            self.window_var.set(obs_windows[0])
+        window_frame = ttk.Frame(main_frame)
+        window_frame.pack(fill=tk.X, pady=5)
+        self.window_combo = ttk.Combobox(window_frame, textvariable=self.window_var, width=30)
+        self.window_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        ttk.Button(window_frame, text="Refresh", command=self.refresh_windows, width=9).pack(side=tk.LEFT)
+        self.refresh_windows(update_status=False)
 
         ttk.Label(main_frame, text="Circle Radius:").pack(pady=(14, 5))
         radius_frame = ttk.Frame(main_frame)
@@ -317,7 +316,6 @@ class App(ttkthemes.ThemedTk):
             pady=20
         )
 
-        self.status_var = tk.StringVar(value="Ready")
         ttk.Label(main_frame, textvariable=self.status_var, font=("Helvetica", 10, "italic")).pack(pady=10)
 
         if self.config_warnings:
@@ -325,6 +323,25 @@ class App(ttkthemes.ThemedTk):
 
     def show_config_warnings(self):
         messagebox.showwarning("Azusa Detector config", "\n".join(self.config_warnings))
+
+    def refresh_windows(self, update_status=True):
+        previous_title = self.window_var.get()
+        window_titles = [title for title in gw.getAllTitles() if title]
+        self.window_combo["values"] = window_titles
+
+        if previous_title in window_titles:
+            self.window_var.set(previous_title)
+        else:
+            obs_windows = [title for title in window_titles if "OBS" in title]
+            if obs_windows:
+                self.window_var.set(obs_windows[0])
+            elif window_titles:
+                self.window_var.set(window_titles[0])
+            else:
+                self.window_var.set("")
+
+        if update_status:
+            self.status_var.set(f"Window list refreshed ({len(window_titles)} found)")
 
     def current_radius(self):
         try:
