@@ -33,12 +33,11 @@ DEFAULT_CONFIG = {
         "cooldown_sec": 5.0,
         "ocr_fallback": False,
     },
-    "timer_roi": {"x_ratio": 0.40, "y_ratio": 0.02, "w_ratio": 0.20, "h_ratio": 0.10},
+    "timer_roi": {"x_ratio": 0.42, "y_ratio": -0.98, "w_ratio": 0.13, "h_ratio": 0.08},
     "detect": {"circle_radius": 45},
 }
 
-DIGIT_TEMPLATE_THRESHOLD = 0.72
-DIGIT_TEMPLATE_SCALES = (0.85, 1.0, 1.15)
+DIGIT_CANDIDATE_SCORE_MIN = 0.25
 RESULT_OVERLAY_SEC = 3.0
 STATUS_OVERLAY_SEC = 2.0
 
@@ -149,14 +148,10 @@ def validate_timer_roi(value, warnings):
     }
 
     if (
-        roi["x_ratio"] < 0
-        or roi["y_ratio"] < 0
-        or roi["w_ratio"] <= 0
-        or roi["h_ratio"] <= 0
-        or roi["x_ratio"] >= 1
-        or roi["y_ratio"] >= 1
-        or roi["x_ratio"] + roi["w_ratio"] > 1
-        or roi["y_ratio"] + roi["h_ratio"] > 1
+        not -2.0 <= roi["x_ratio"] <= 2.0
+        or not -2.0 <= roi["y_ratio"] <= 2.0
+        or not 0 < roi["w_ratio"] <= 2.0
+        or not 0 < roi["h_ratio"] <= 2.0
     ):
         warnings.append("timer_roi ratios are out of range; using defaults.")
         return deepcopy(default)
@@ -490,9 +485,18 @@ class TimerDetector:
                 template = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
                 if template is None or template.size == 0:
                     continue
-                templates[str(digit)] = template
+                templates[str(digit)] = self.binarize_timer_image(template)
                 break
         return templates
+
+    @staticmethod
+    def binarize_timer_image(image):
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+        _, binary = cv2.threshold(gray, 185, 255, cv2.THRESH_BINARY)
+        return binary
 
     def crop_timer_roi(self, frame, rect):
         if rect is None:
@@ -533,53 +537,55 @@ class TimerDetector:
         if not self.templates:
             return None
 
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        matches = []
-        roi_h, roi_w = gray.shape[:2]
-
-        for digit, template in self.templates.items():
-            template_h, template_w = template.shape[:2]
-            for scale in DIGIT_TEMPLATE_SCALES:
-                scaled_w = max(1, int(template_w * scale))
-                scaled_h = max(1, int(template_h * scale))
-                if scaled_w > roi_w or scaled_h > roi_h:
-                    continue
-
-                scaled_template = cv2.resize(template, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
-                result = cv2.matchTemplate(gray, scaled_template, cv2.TM_CCOEFF_NORMED)
-                locations = np.argwhere(result >= DIGIT_TEMPLATE_THRESHOLD)
-                if locations.size == 0:
-                    continue
-
-                scored_locations = [
-                    (float(result[y, x]), int(x), int(y)) for y, x in locations
-                ]
-                scored_locations.sort(reverse=True)
-                for score, match_x, match_y in scored_locations[:25]:
-                    matches.append(
-                        {
-                            "digit": digit,
-                            "score": score,
-                            "x": match_x,
-                            "y": match_y,
-                            "w": scaled_w,
-                            "h": scaled_h,
-                        }
-                    )
-
-        if not matches:
+        binary = self.binarize_timer_image(roi)
+        boxes = self.find_digit_boxes(binary)
+        if len(boxes) < 2:
             return None
 
-        selected = []
-        for match in sorted(matches, key=lambda item: item["score"], reverse=True):
-            if any(rect_iou(match, existing) > 0.25 for existing in selected):
-                continue
-            selected.append(match)
-            if len(selected) >= 6:
-                break
+        digits = []
+        for x, y, w, h in boxes:
+            candidate = binary[y : y + h, x : x + w]
+            digit, score = self.match_digit_candidate(candidate)
+            if digit is not None and score >= DIGIT_CANDIDATE_SCORE_MIN:
+                digits.append((x, digit, score))
 
-        selected.sort(key=lambda item: item["x"])
-        return seconds_from_digits("".join(item["digit"] for item in selected))
+        if len(digits) < 2:
+            return None
+
+        digits.sort(key=lambda item: item[0])
+        return seconds_from_digits("".join(digit for _, digit, _ in digits))
+
+    @staticmethod
+    def find_digit_boxes(binary):
+        roi_h, roi_w = binary.shape[:2]
+        min_h = max(12, int(roi_h * 0.18))
+        max_h = max(min_h, int(roi_h * 0.65))
+        max_w = max(8, int(roi_w * 0.25))
+        min_y = int(roi_h * 0.35)
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+        boxes = []
+        for label in range(1, num_labels):
+            x, y, w, h, area = stats[label]
+            if y >= min_y and min_h <= h <= max_h and 2 <= w <= max_w and area >= 20:
+                boxes.append((int(x), int(y), int(w), int(h)))
+        boxes.sort(key=lambda item: item[0])
+        return boxes
+
+    def match_digit_candidate(self, candidate):
+        best_digit = None
+        best_score = -1.0
+        candidate_h, candidate_w = candidate.shape[:2]
+
+        for digit, template in self.templates.items():
+            resized = cv2.resize(template, (candidate_w, candidate_h), interpolation=cv2.INTER_AREA)
+            result = cv2.matchTemplate(candidate, resized, cv2.TM_CCOEFF_NORMED)
+            score = float(result[0][0])
+            if score > best_score:
+                best_digit = digit
+                best_score = score
+
+        return best_digit, best_score
 
     def read_with_ocr(self, roi):
         if self.ocr_available is False:
