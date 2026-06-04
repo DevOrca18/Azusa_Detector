@@ -343,7 +343,16 @@ class App(ttkthemes.ThemedTk):
         auto_section = ttk.LabelFrame(main_frame, text="Auto Timer", style="Section.TLabelframe")
         auto_section.grid(row=4, column=0, sticky=tk.EW, pady=(12, 0))
         ttk.Checkbutton(auto_section, text="Enable auto start/finish", variable=self.auto_enabled_var).grid(
-            row=0, column=0, sticky=tk.W, padx=12, pady=12
+            row=0, column=0, sticky=tk.W, padx=12, pady=(12, 4)
+        )
+        auto_cfg = config["auto"]
+        auto_hint = (
+            f"Starts at {auto_cfg['start_band'][0]}-{auto_cfg['start_band'][1]}s, "
+            f"ends at {auto_cfg['end_band'][0]}-{auto_cfg['end_band'][1]}s or timer lost "
+            f"({auto_cfg['grace_sec']:.0f}s). Bands: config.json"
+        )
+        ttk.Label(auto_section, text=auto_hint, style="Hint.TLabel").grid(
+            row=1, column=0, sticky=tk.W, padx=12, pady=(0, 10)
         )
 
         ttk.Button(main_frame, text="Start Monitoring", command=self.start_monitoring, style="Primary.TButton").grid(
@@ -381,6 +390,7 @@ class App(ttkthemes.ThemedTk):
         self.style.configure("Section.TLabel", background=panel, foreground=text)
         self.style.configure("Title.TLabel", background=bg, foreground="#ffffff", font=("Segoe UI", 18, "bold"))
         self.style.configure("Status.TLabel", background=bg, foreground=muted, font=("Segoe UI", 9))
+        self.style.configure("Hint.TLabel", background=panel, foreground=muted, font=("Segoe UI", 9))
 
         self.style.configure(
             "Section.TLabelframe",
@@ -500,8 +510,9 @@ class App(ttkthemes.ThemedTk):
 
         save_config(validated_config)
         self.status_var.set("Monitoring started...")
+        # 직접 실행하지 않고 요청만 남김 — 모니터링 종료 후 시작창으로 복귀하는 루프(__main__)가 처리
+        self.monitor_target = (window_title, validated_config)
         self.destroy()
-        main(window_title, validated_config)
 
 
 def detect_black_rectangle(frame):
@@ -1066,7 +1077,7 @@ def draw_keycap(frame, x, y, key, width, height, accent_color):
 def draw_shortcut_guide(frame, margin):
     height, width = frame.shape[:2]
     controls = [
-        ("Q", "Quit"),
+        ("Q/ESC", "Back to setup"),
         ("R", "Record on/off"),
         ("M", "Mute"),
         ("+/-", "Radius"),
@@ -1163,7 +1174,7 @@ def draw_result_card(frame, result):
     draw_text(frame, extra, x1 + 24, y1 + 108, 0.52, (170, 180, 192), 1)
 
 
-def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds, timer_method, status_message):
+def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds, timer_method, status_message, last_result=None):
     height, width = frame.shape[:2]
     margin = max(12, int(min(width, height) * 0.014))
     panel_w = min(max(330, int(width * 0.28)), width - margin * 2)
@@ -1223,8 +1234,11 @@ def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds,
     mute_label = "Muted ON" if is_muted else "Muted OFF"
     mute_color = (80, 96, 230) if is_muted else muted
     draw_text(frame, mute_label, x1 + 130, row_y, 0.52, mute_color, 1)
-    if timer_seconds is None:
-        draw_text(frame, "Timer --", x1 + 246, row_y, 0.52, muted, 1)
+    if last_result is not None:
+        # 결과 카드(3초)가 사라진 뒤에도 마지막 세션 결과를 항상 확인 가능
+        grade_colors = {"GOOD": (92, 220, 126), "SOSO": (64, 202, 255), "BAD": (86, 118, 255)}
+        last_text = f"Last {last_result['grade']} {last_result['outside_ratio'] * 100:.1f}%"
+        draw_text(frame, last_text, x1 + 246, row_y, 0.52, grade_colors.get(last_result["grade"], muted), 1)
 
     if status_message:
         status_scale = fit_text_scale(status_message, panel_w - 28, 0.48, 0.36)
@@ -1279,6 +1293,9 @@ def main(window_title, config):
 
         if initial_rectangle is None:
             initial_rectangle, frame = detect_black_rectangle(frame)
+            if initial_rectangle is None:
+                # 인식 전 무화면 방치 방지 — 뭘 기다리는지 표시 (매 프레임 갱신이라 인식되면 자연 소멸)
+                status_message, status_message_until = set_status("Looking for play area (black box)...")
         elif initial_rectangle:
             x, y, w, h = initial_rectangle
             cv2.rectangle(frame, (x, y), (x + w, y + h), (88, 178, 118), 1)
@@ -1332,6 +1349,7 @@ def main(window_title, config):
             timer_seconds,
             timer_method,
             status_message,
+            last_result,
         )
 
         if time.time() < result_overlay_until:
@@ -1344,7 +1362,9 @@ def main(window_title, config):
         cv2.imshow(DISPLAY_WINDOW_NAME, frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
+        # 창 X버튼으로 닫아도 Q와 동일하게 안전 종료 (녹화 중이면 저장)
+        window_closed = cv2.getWindowProperty(DISPLAY_WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1
+        if key in (ord("q"), 27) or window_closed:  # Q / ESC / 창닫기
             if session is not None:
                 last_result = finish_recording(session, initial_rectangle)
                 auto_state.record_stopped(last_result, time.time())
@@ -1392,6 +1412,12 @@ def main(window_title, config):
 if __name__ == "__main__":
     if getattr(sys, "frozen", False):
         hide_console()
-    loaded_config, loaded_warnings = load_config()
-    app = App(loaded_config, loaded_warnings)
-    app.mainloop()
+    # 모니터링 종료(Q/ESC/창닫기) 시 시작창으로 복귀 — 설정 바꾸려고 재실행할 필요 없음
+    while True:
+        loaded_config, loaded_warnings = load_config()
+        app = App(loaded_config, loaded_warnings)
+        app.mainloop()
+        target = getattr(app, "monitor_target", None)
+        if not target:
+            break
+        main(*target)
