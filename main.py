@@ -600,12 +600,7 @@ def seconds_from_digits(digits):
     digits = "".join(char for char in digits if char.isdigit())
     if not digits:
         return None
-    if len(digits) == 3 and digits[0] in ("0", "1"):
-        value = int(digits[2])
-    elif len(digits) >= 4:
-        value = int(digits[-2:])
-    else:
-        value = int(digits[-2:]) if len(digits) >= 2 else int(digits)
+    value = int(digits[-2:]) if len(digits) >= 2 else int(digits)
     if 0 <= value <= 59:
         return value
     return None
