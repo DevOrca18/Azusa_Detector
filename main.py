@@ -23,6 +23,7 @@ WHITE_THRESHOLD_LOW = np.array([0, 0, 200])
 WHITE_THRESHOLD_HIGH = np.array([180, 25, 255])
 
 DEFAULT_CONFIG = {
+    "windows": {"obs_title": "", "game_title": ""},
     "grading": {"good_max": 0.05, "soso_max": 0.15},
     "auto": {
         "enabled": True,
@@ -164,9 +165,23 @@ def validate_timer_roi(value, warnings):
     return roi
 
 
+def validate_windows_config(value, warnings):
+    default = DEFAULT_CONFIG["windows"]
+    if not isinstance(value, dict):
+        warnings.append("windows is invalid; using defaults.")
+        return deepcopy(default)
+
+    return {
+        "obs_title": str(value.get("obs_title") or ""),
+        "game_title": str(value.get("game_title") or ""),
+    }
+
+
 def validate_config(config):
     warnings = []
     merged = deep_merge(DEFAULT_CONFIG, config)
+
+    merged["windows"] = validate_windows_config(merged.get("windows"), warnings)
 
     grading_config = merged["grading"] if isinstance(merged.get("grading"), dict) else {}
     if not grading_config:
@@ -272,15 +287,16 @@ class App(ttkthemes.ThemedTk):
         self.config_warnings = config_warnings
 
         self.title("Azusa Detector")
-        self.geometry("480x460")
-        self.minsize(460, 450)
+        self.geometry("520x520")
+        self.minsize(500, 500)
         self.resizable(True, True)
 
         self.configure(background="#20242b")
         self.style = ttk.Style(self)
         self.configure_styles()
 
-        self.window_var = tk.StringVar()
+        self.obs_window_var = tk.StringVar(value=config["windows"].get("obs_title", ""))
+        self.game_window_var = tk.StringVar(value=config["windows"].get("game_title", ""))
         self.radius_var = tk.StringVar(value=str(config["detect"]["circle_radius"]))
         self.good_var = tk.StringVar(value=str(config["grading"]["good_max"]))
         self.soso_var = tk.StringVar(value=str(config["grading"]["soso_max"]))
@@ -297,13 +313,21 @@ class App(ttkthemes.ThemedTk):
             row=0, column=0, sticky=tk.W, pady=(0, 14)
         )
 
-        window_section = ttk.LabelFrame(main_frame, text="Window", style="Section.TLabelframe")
+        window_section = ttk.LabelFrame(main_frame, text="Windows", style="Section.TLabelframe")
         window_section.grid(row=1, column=0, sticky=tk.EW)
-        window_section.columnconfigure(0, weight=1)
-        self.window_combo = ttk.Combobox(window_section, textvariable=self.window_var, state="readonly")
-        self.window_combo.grid(row=0, column=0, sticky=tk.EW, padx=(12, 8), pady=12)
+        window_section.columnconfigure(1, weight=1)
+        ttk.Label(window_section, text="OBS", style="Section.TLabel").grid(
+            row=0, column=0, sticky=tk.W, padx=(12, 10), pady=(12, 6)
+        )
+        self.obs_window_combo = ttk.Combobox(window_section, textvariable=self.obs_window_var, state="readonly")
+        self.obs_window_combo.grid(row=0, column=1, sticky=tk.EW, padx=(0, 8), pady=(12, 6))
+        ttk.Label(window_section, text="Game", style="Section.TLabel").grid(
+            row=1, column=0, sticky=tk.W, padx=(12, 10), pady=(0, 12)
+        )
+        self.game_window_combo = ttk.Combobox(window_section, textvariable=self.game_window_var, state="readonly")
+        self.game_window_combo.grid(row=1, column=1, sticky=tk.EW, padx=(0, 8), pady=(0, 12))
         ttk.Button(window_section, text="Refresh", command=self.refresh_windows, width=10).grid(
-            row=0, column=1, sticky=tk.E, padx=(0, 12), pady=12
+            row=0, column=2, rowspan=2, sticky=tk.E, padx=(0, 12), pady=12
         )
         self.refresh_windows(update_status=False)
 
@@ -462,20 +486,32 @@ class App(ttkthemes.ThemedTk):
         return "break"
 
     def refresh_windows(self, update_status=True):
-        previous_title = self.window_var.get()
+        previous_obs_title = self.obs_window_var.get()
+        previous_game_title = self.game_window_var.get()
         window_titles = [title for title in gw.getAllTitles() if title]
-        self.window_combo["values"] = window_titles
+        self.obs_window_combo["values"] = window_titles
+        self.game_window_combo["values"] = window_titles
 
-        if previous_title in window_titles:
-            self.window_var.set(previous_title)
+        obs_windows = [title for title in window_titles if "OBS" in title.upper()]
+        if previous_obs_title in window_titles:
+            self.obs_window_var.set(previous_obs_title)
+        elif obs_windows:
+            self.obs_window_var.set(obs_windows[0])
+        elif window_titles:
+            self.obs_window_var.set(window_titles[0])
         else:
-            obs_windows = [title for title in window_titles if "OBS" in title]
-            if obs_windows:
-                self.window_var.set(obs_windows[0])
+            self.obs_window_var.set("")
+
+        if previous_game_title in window_titles:
+            self.game_window_var.set(previous_game_title)
+        else:
+            non_obs_windows = [title for title in window_titles if title not in obs_windows]
+            if non_obs_windows:
+                self.game_window_var.set(non_obs_windows[0])
             elif window_titles:
-                self.window_var.set(window_titles[0])
+                self.game_window_var.set(window_titles[0])
             else:
-                self.window_var.set("")
+                self.game_window_var.set("")
 
         if update_status:
             self.status_var.set(f"Window list refreshed ({len(window_titles)} found)")
@@ -493,12 +529,19 @@ class App(ttkthemes.ThemedTk):
         self.radius_var.set(str(self.current_radius() + 1))
 
     def start_monitoring(self):
-        window_title = self.window_var.get().strip()
-        if not window_title:
-            messagebox.showwarning("Azusa Detector", "Select a target window first.")
+        obs_window_title = self.obs_window_var.get().strip()
+        game_window_title = self.game_window_var.get().strip()
+        if not obs_window_title:
+            messagebox.showwarning("Azusa Detector", "Select an OBS window first.")
+            return
+        if not game_window_title:
+            messagebox.showwarning("Azusa Detector", "Select a game window first.")
             return
 
         updated_config = deepcopy(self.config_data)
+        updated_config.setdefault("windows", deepcopy(DEFAULT_CONFIG["windows"]))
+        updated_config["windows"]["obs_title"] = obs_window_title
+        updated_config["windows"]["game_title"] = game_window_title
         updated_config["detect"]["circle_radius"] = self.radius_var.get()
         updated_config["grading"]["good_max"] = self.good_var.get()
         updated_config["grading"]["soso_max"] = self.soso_var.get()
@@ -511,7 +554,7 @@ class App(ttkthemes.ThemedTk):
         save_config(validated_config)
         self.status_var.set("Monitoring started...")
         # 직접 실행하지 않고 요청만 남김 — 모니터링 종료 후 시작창으로 복귀하는 루프(__main__)가 처리
-        self.monitor_target = (window_title, validated_config)
+        self.monitor_target = (obs_window_title, game_window_title, validated_config)
         self.destroy()
 
 
@@ -1076,7 +1119,7 @@ def draw_shortcut_guide(frame, margin):
         ("R", "Record on/off"),
         ("M", "Mute"),
         ("+/-", "Radius"),
-        ("C", "Save timer ROI"),
+        ("C", "Save game timer ROI"),
     ]
 
     bg = (18, 22, 28)
@@ -1253,15 +1296,31 @@ def initialize_display_window(frame):
     cv2.resizeWindow(DISPLAY_WINDOW_NAME, max(320, int(width * scale)), max(240, int(height * scale)))
 
 
-def main(window_title, config):
+def find_window_handle(window_title, label):
     windows = gw.getWindowsWithTitle(window_title)
     if not windows:
-        print(f"Window not found: {window_title}")
-        return
+        print(f"{label} window not found: {window_title}")
+        return None
 
     hwnd = win32gui.FindWindow(None, window_title)
     if not hwnd:
-        print(f"Window handle not found: {window_title}")
+        print(f"{label} window handle not found: {window_title}")
+        return None
+    return hwnd
+
+
+def full_frame_rect(frame):
+    height, width = frame.shape[:2]
+    return (0, 0, width, height)
+
+
+def main(obs_window_title, game_window_title, config):
+    obs_hwnd = find_window_handle(obs_window_title, "OBS")
+    if not obs_hwnd:
+        return
+
+    game_hwnd = find_window_handle(game_window_title, "Game")
+    if not game_hwnd:
         return
 
     initial_rectangle = None
@@ -1280,11 +1339,25 @@ def main(window_title, config):
 
     while True:
         now = time.time()
-        screenshot = capture_window(hwnd)
-        raw_frame = cv2.cvtColor(screenshot, cv2.COLOR_RGBA2BGR)
+        obs_screenshot = capture_window(obs_hwnd)
+        raw_frame = cv2.cvtColor(obs_screenshot, cv2.COLOR_RGBA2BGR)
+        if game_hwnd == obs_hwnd:
+            timer_raw_frame = raw_frame
+        else:
+            game_screenshot = capture_window(game_hwnd)
+            timer_raw_frame = cv2.cvtColor(game_screenshot, cv2.COLOR_RGBA2BGR)
+        timer_frame_rect = full_frame_rect(timer_raw_frame)
         frame = raw_frame.copy()
         timer_seconds = None
         timer_method = None
+
+        timer_seconds, timer_roi_rect, timer_method = timer_detector.read_seconds(
+            timer_raw_frame,
+            timer_frame_rect,
+            now,
+        )
+        if timer_method:
+            timer_method = f"{timer_method}/game"
 
         if initial_rectangle is None:
             initial_rectangle, frame = detect_black_rectangle(frame)
@@ -1296,8 +1369,7 @@ def main(window_title, config):
             cv2.rectangle(frame, (x, y), (x + w, y + h), (88, 178, 118), 1)
 
         if initial_rectangle:
-            timer_seconds, timer_roi_rect, timer_method = timer_detector.read_seconds(raw_frame, initial_rectangle, now)
-            if timer_roi_rect:
+            if timer_roi_rect and game_hwnd == obs_hwnd:
                 rx, ry, rw, rh = timer_roi_rect
                 cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), (255, 178, 74), 1)
 
@@ -1391,15 +1463,15 @@ def main(window_title, config):
             status_message, status_message_until = set_status(f"Mute {'enabled' if is_muted else 'disabled'}")
             print(f"Mute {'enabled' if is_muted else 'disabled'}")
         elif key == ord("c"):
-            if initial_rectangle:
-                saved_path = save_timer_calibration(raw_frame, initial_rectangle, timer_detector)
+            if timer_frame_rect:
+                saved_path = save_timer_calibration(timer_raw_frame, timer_frame_rect, timer_detector)
                 if saved_path:
                     status_message, status_message_until = set_status(f"Saved timer ROI: {os.path.basename(saved_path)}")
                     print(f"Saved timer ROI to {saved_path}")
                 else:
                     status_message, status_message_until = set_status("Failed to save timer ROI")
             else:
-                status_message, status_message_until = set_status("No play rectangle yet")
+                status_message, status_message_until = set_status("No game frame yet")
 
     cv2.destroyAllWindows()
 
