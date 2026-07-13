@@ -1,8 +1,4 @@
-/build/
-/main.spec
-/dist/sasuke_detector.exe
-/sub.py
-/sub.spec
-/gaze_splash.mp4
-/azusa_record/*
-/dist/sub.exe
+__pycache__/
+*.py[cod]
+config.json
+azusa_record/
