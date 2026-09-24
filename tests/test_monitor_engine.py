@@ -127,12 +127,75 @@ class MonitorEngineTests(unittest.TestCase):
     def test_auto_recording_and_timer_loss_follow_same_live_pipeline(self):
         self.config["auto"]["enabled"] = True
         self.config["auto"]["debounce_frames"] = 1
+        self.config["auto"]["end_mode"] = "timer"
         self.engine.start(self.config)
         with patch.object(self.engine.timer, "read_seconds", return_value=(58, None, "template")), patch("monitor_engine.time.time", return_value=10):
             self.engine.step(self.frame((100, 100)), self.frame(), 1)
         self.assertEqual(self.engine.session.source, "auto")
         with patch("monitor_engine.time.time", return_value=20), patch.object(app, "finish_recording", side_effect=lambda session, _: session.finish()) as save:
-            self.engine.missing(3)
+            self.engine.missing(4)
+        save.assert_called_once()
+        self.assertIsNone(self.engine.session)
+
+    def test_fixed_duration_survives_missing_captures_and_saves_at_deadline(self):
+        self.config["auto"].update({"enabled": True, "debounce_frames": 1})
+        self.engine.start(self.config)
+        with patch.object(self.engine.timer, "read_seconds", return_value=(58, None, "template")):
+            self.engine.step(self.frame((100, 100)), self.frame(), 10)
+        session = self.engine.session
+        with patch.object(app, "finish_recording", side_effect=lambda recorder, _: recorder.finish()) as save:
+            # Wall-clock changes and missing game/OBS frames do not end the run.
+            with patch("monitor_engine.time.time", return_value=10_000):
+                self.engine.missing(20)
+                self.engine.step(self.frame((105, 100)), None, 35)
+            self.engine.missing(69.999)
+            self.assertIs(self.engine.session, session)
+            save.assert_not_called()
+            self.assertEqual(session.data[1][2:4], [None, None])
+            with patch("monitor_engine.time.monotonic", return_value=40):
+                state = self.engine.snapshot()
+            self.assertEqual(state["remaining"], 30)
+            self.assertEqual(state["elapsed"], 30)
+            self.engine.missing(70)
+            self.engine.missing(71)
+        save.assert_called_once()
+        self.assertIsNone(self.engine.session)
+        self.assertTrue(self.engine.running)
+        self.assertEqual(len(session.data), 4)
+
+    def test_duration_deadline_saves_before_processing_a_late_frame(self):
+        self.config["auto"].update({"enabled": True, "debounce_frames": 1, "duration_sec": 5})
+        self.engine.start(self.config)
+        with patch.object(self.engine.timer, "read_seconds", return_value=(58, None, "template")):
+            self.engine.step(self.frame((100, 100)), self.frame(), 10)
+        session = self.engine.session
+        with patch.object(app, "finish_recording", side_effect=lambda recorder, _: recorder.finish()) as save:
+            self.engine.step(self.frame((105, 100)), None, 15)
+        save.assert_called_once()
+        self.assertEqual(len(session.data), 1)
+        self.assertIsNone(self.engine.session)
+
+    def test_duration_deadline_does_not_stop_manual_recordings(self):
+        self.config["auto"]["enabled"] = True
+        self.engine.start(self.config)
+        self.engine.record()
+        with patch.object(app, "finish_recording") as save:
+            self.engine.check_deadline(1_000_000)
+        save.assert_not_called()
+        self.assertEqual(self.engine.session.source, "manual")
+
+    def test_failed_deadline_save_can_retry_without_losing_the_recording(self):
+        self.config["auto"].update({"enabled": True, "debounce_frames": 1})
+        self.engine.start(self.config)
+        with patch.object(self.engine.timer, "read_seconds", return_value=(58, None, "template")):
+            self.engine.step(self.frame((100, 100)), self.frame(), 10)
+        with patch.object(app, "finish_recording", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.engine.check_deadline(70)
+        self.assertIsNotNone(self.engine.session)
+        self.assertEqual(self.engine.auto.deadline, 70)
+        with patch.object(app, "finish_recording", side_effect=lambda recorder, _: recorder.finish()) as save:
+            self.engine.check_deadline(71)
         save.assert_called_once()
         self.assertIsNone(self.engine.session)
 

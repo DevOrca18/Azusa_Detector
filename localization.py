@@ -82,6 +82,18 @@ ROWS = [
 ]
 
 ROWS.extend([
+    ("자동 종료", "Auto stop", "自動終了", "自动结束"),
+    ("시간 지정", "Fixed duration", "時間指定", "固定时长"),
+    ("타이머 감지", "Timer detection", "タイマー検出", "计时器检测"),
+    ("기록 시간", "Duration", "記録時間", "记录时长"),
+    ("초", "sec", "秒", "秒"),
+    ("기록 시간 · 1–3600초", "Duration · 1–3600 seconds", "記録時間・1–3600秒", "记录时长 · 1–3600秒"),
+    ("시작 감지 {a}–{b}초", "Start detection: {a}–{b} sec", "開始検出 {a}–{b}秒", "开始检测 {a}–{b}秒"),
+    ("자동 기록 시작 · {seconds}초", "Auto recording started · {seconds} sec", "自動記録開始・{seconds}秒", "自动记录开始 · {seconds}秒"),
+    ("자동 기록 종료 · 설정 시간 경과", "Auto recording stopped · Duration reached", "自動記録終了・指定時間経過", "自动记录结束 · 已达设定时长"),
+    ("자동 기록 종료 · 종료 타이머 감지", "Auto recording stopped · End timer detected", "自動記録終了・終了タイマー検出", "自动记录结束 · 检测到结束计时器"),
+    ("자동 기록 종료 · 타이머 미감지", "Auto recording stopped · Timer lost", "自動記録終了・タイマー未検出", "自动记录结束 · 计时器未检测到"),
+    ("자동 기록 {time} · 남은 {remaining}", "Auto {time} · Remaining {remaining}", "自動記録 {time}・残り {remaining}", "自动记录 {time} · 剩余 {remaining}"),
     ("활동 로그", "Activity log", "動作ログ", "运行日志"),
     ("사용법", "Guide", "使い方", "使用指南"),
     ("프로그램 시작", "Application started", "アプリ起動", "程序已启动"),

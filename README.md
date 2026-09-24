@@ -114,7 +114,10 @@ Starting a new monitoring run, requesting redetection, or changing the input dim
 ### 5. View recordings and activity
 
 - Press **R** or click the record icon to start or stop a manual CSV recording.
-- Enable automatic recording from the game timer to use the configured start/end time ranges.
+- Enable automatic recording from the game timer. The default **Fixed duration** mode starts after stable detection of the start range (55–59 seconds), records for **60 seconds**, then saves automatically. The 60 seconds are measured from recording start, independently of the game timer.
+- Change **Duration** to an integer from **1 to 3600 seconds** before monitoring. Missing timer readings, a lost capture, or an early 0/1 reading do not stop a timed recording. The live panel shows the time remaining; missing positions remain blank in the CSV.
+- Select **Timer detection** for the previous behavior: stop after stable detection of the end range (0–1 seconds), or after the timer is missing for more than 2 seconds. Choose the stop mode and duration before monitoring.
+- After an automatic recording ends, monitoring continues. Following the 5-second cooldown, a new valid start detection can start the next recording. R, ESC, redetection, closing the app, or turning automatic recording off can still end a recording early. Resizing the capture also ends it to preserve coordinate consistency.
 - Open saved files with the **recordings folder** button on the left. Recordings contain data, not video.
 - The **activity log** below the character shows starts, stops, setting changes, saved recordings, and errors.
 - A played sound appears as `[14:30:12] (ᓀ‸ᓂ)`. Muting, disabled beeps, and sample playback do not produce sound entries.
@@ -151,6 +154,7 @@ Files are stored relative to the executable's folder, or the repository folder w
 
 On another PC, recheck window names, the OBS input, and the timer region.
 The bundled timer reader uses digit templates. Tesseract OCR is not included in the executable.
+Existing settings files without an automatic stop mode use the new **Fixed duration / 60 seconds** default on upgrade.
 
 ## Troubleshooting
 
