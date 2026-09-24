@@ -1,6 +1,7 @@
 import csv
 import tempfile
 import unittest
+from contextlib import ExitStack
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -48,6 +49,12 @@ class TrackingTests(unittest.TestCase):
         tracker.update((2.0, 3.0), 2.0)
         self.assertEqual(tracker.delta, (2.0, 3.0))
 
+    def test_windowless_build_does_not_hide_another_app(self):
+        with patch.object(app.windll.kernel32, "GetConsoleWindow", return_value=0), \
+                patch.object(app.win32gui, "ShowWindow") as show:
+            app.hide_console()
+        show.assert_not_called()
+
     def test_detects_centers_inside_and_outside_independent_of_circle(self):
         for point, outside in [((120, 110), False), ((165, 110), False), ((170, 110), True)]:
             with self.subTest(point=point):
@@ -70,7 +77,7 @@ class TrackingTests(unittest.TestCase):
         frame[50, 50] = 255
         self.assertEqual(app.detect_white_point(frame, self.rect), (120, 110))
 
-    def test_circle_toggle_keeps_origin_delta_and_excludes_unjudged_frames(self):
+    def test_recorder_excludes_unjudged_frames_without_losing_coordinates(self):
         recorder = app.SessionRecorder(self.config, "manual")
         tracker = app.PointTracker()
         samples = [((120, 110), True), ((180, 110), False), (None, True), ((190, 110), True)]
@@ -124,9 +131,9 @@ class TrackingTests(unittest.TestCase):
             result = recorder.finish()
         self.assertEqual(result["max_outside_s"], 1.0)
 
-    def test_old_config_defaults_to_circle_on_and_off_round_trips(self):
+    def test_old_config_defaults_to_position_and_off_round_trips(self):
         config, warnings = app.validate_config({"detect": {"circle_radius": 10}})
-        self.assertTrue(config["detect"]["circle_enabled"])
+        self.assertFalse(config["detect"]["circle_enabled"])
         self.assertFalse(warnings)
         config["detect"]["circle_enabled"] = False
         with tempfile.TemporaryDirectory() as folder, patch.object(app, "CONFIG_FILE", str(Path(folder) / "config.json")):

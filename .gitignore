@@ -3,3 +3,7 @@ __pycache__/
 config.json
 azusa_record/
 .venv/
+build/
+release/
+self-test.json
+assets/digits/calibration/

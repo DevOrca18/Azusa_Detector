@@ -1,77 +1,183 @@
 # Azusa Detector (ᓀ‸ᓂ)
-## Coordinate tracking and optional circle judging
 
-Windows / Python 3.12:
+A Windows app that detects a white dot inside the black area of an OBS window and tracks its position, movement, and distance from a fixed circle.
+**Position tracking** is the default mode. The interface supports English, Japanese, Korean, and Simplified Chinese.
+
+## Installation
+
+### Download the Windows app
+
+1. Download the Windows x64 ZIP from the [latest release](https://github.com/DevOrca18/Azusa_Detector/releases/latest).
+2. Extract the entire ZIP into a folder you can write to, then run `AzusaDetector.exe`.
+3. For live monitoring, start OBS and the target game separately.
+
+No Python or pip installation is required. The executable includes the sample video, alert sound, timer digit templates, and UI artwork.
+Extract the archive before running the app: settings and recordings are written beside the executable.
+
+The repository's `dist/main.exe` is an older build. Use `AzusaDetector.exe` from the latest release.
+When sharing the app, distribute the ZIP with its instructions, source, and dependency licenses.
+
+### Run from source
+
+Requires Windows x64, Python 3.12, and Git. Run in PowerShell:
+
 ```powershell
-py -3 -m venv .venv
+git clone https://github.com/DevOrca18/Azusa_Detector.git
+cd Azusa_Detector
+py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe main.py
 ```
 
-- Use **Circle judging** in setup, the **Circle ON/OFF** button in the monitoring
-  window, or **O** while that window is focused. The choice is saved in `config.json`.
-- **ON** shows the circle and enables outside alerts and grading. **OFF** hides
-  the circle and disables alerts/grading; position tracking and recording continue.
-- **Position** is relative to the first valid detection. **Delta** compares the
-  current valid detection with the previous valid detection. The first detection
-  has position `(0, 0)` and no delta. Toggling the circle or recording does not reset
-  these references; starting a new monitoring run does.
-- Missing detections retain the last displayed values with a **NO DETECTION** label.
-  For `A -> missing -> missing -> B`, the next delta is `B - A`. Missing CSV rows
-  have blank coordinates/deltas, never invented zeroes. `Delta Time (s)` includes
-  the gap between the two valid detections.
-- Coordinates use original OBS capture pixels: right is +X, down is +Y. They are
-  not game-world distances or pixels in the resized Display window.
-- The detector uses the center of a white connected component anywhere in the
-  black play area. It ignores components below 3 pixels, components larger than
-  5% of the area, and ambiguous candidates when the largest is less than twice the
-  size of the runner-up. These are simple noise filters, not a guarantee against
-  all false detections; the existing white-dot-on-black OBS setup is still needed.
-- **R** starts/stops CSV recording. Per-frame CSVs retain the original six columns
-  and append detection status, circle mode, relative position, delta, and delta time.
-  `sessions_v2.csv` stores total/detected/judged frame counts. Only valid detections
-  with circle judging ON enter the grade denominator. No judged frames means **N/A**.
-  Existing `sessions.csv` files are left intact.
+To launch without a console after installation:
 
-Tests:
+```powershell
+.\.venv\Scripts\pythonw.exe main.py
+```
+
+## Usage
+
+### 1. Try the sample video
+
+Click the **play icon** below the preview or press **S** to loop the built-in 14-second white-dot video.
+No OBS or game selection is needed. Press S again to return to the actual source.
+
+The sample demonstrates position, movement, circle judging, and measurement guides.
+It is a silent preview with no recording. The position reference resets at the start of each loop.
+The sample's black area uses its original 1920×1080 pixels; values may differ from an image scaled down inside an OBS window.
+
+To launch directly into the sample:
+
+```powershell
+.\AzusaDetector.exe --sample
+# From source:
+.\.venv\Scripts\python.exe main.py --sample
+```
+
+### 2. Select the capture windows
+
+In the first setup step, select the two sources:
+
+| Source | Purpose |
+| --- | --- |
+| OBS window | Detect the black area and white dot |
+| Game window | Read the game timer for automatic recording |
+
+Prepare the **black background and white dot** input in OBS. Keep its window visible; minimized windows cannot be captured.
+If a window is missing from the list, press **F5** or use the refresh button.
+Missing required sources and invalid active settings are highlighted. The start button stays gray until they are resolved.
+
+### 3. Choose a mode and thresholds
+
+| Mode | Settings | Behavior |
+| --- | --- | --- |
+| Position tracking — default | Separate X/Y or total distance, beep, measurement guide | Compare the current valid detection with the previous valid detection |
+| Circle judging | Radius, GOOD/SOSO limits, beep | Judge and grade movement outside a circle with a fixed center in the black area |
+
+**Position tracking**
+
+- **Separate X/Y:** defaults to X **50 px** and Y **50 px**. Alert when `|ΔX| ≥ X` or `|ΔY| ≥ Y`.
+- **Total distance:** alert when `sqrt(ΔX² + ΔY²) ≥ threshold`.
+- **Beep ON:** show an alert and play a sound when the movement threshold is reached. Movement sounds are limited to once per second.
+- **Measurement guide ON:** show a rectangle for X/Y or a circle for total distance, centered on the previous valid position. This toggle is independent of the beep and does not affect detection or recording.
+
+**Circle judging**
+
+- The circle boundary counts as inside. A point must move beyond it to count as outside.
+- Turning the beep off preserves the visual alert, grading, and alert records.
+- GOOD and SOSO limits are the fraction of valid judged frames detected outside the circle: `0.05 = 5%`.
+- Sessions with no valid judgments, or recorded in position tracking mode, receive an `N/A` grade.
+
+Coordinates and thresholds use **original capture pixels**: right is +X and down is +Y.
+They do not represent the pixels of the scaled preview or physical distance in the game.
+
+### 4. Start and stop monitoring
+
+Click **Start monitoring** to turn the same preview panel into a live monitor.
+If the sample is playing, the app switches to the selected OBS source.
+
+- Before starting: preview only, with no recording or sound.
+- While monitoring: alerts and manual or automatic recording are available.
+- Select sources, mode, and language before starting. Thresholds, beep settings, and measurement guides can change while monitoring.
+- Press **ESC**, click the stop icon below the video, or use the monitoring stop button to stop.
+- Stopping monitoring or closing the app saves an active CSV recording.
+
+**Position references and missing detections**
+
+The first valid detection defines position `(0, 0)`. Each movement value compares two consecutive valid detections.
+For `A → missing → missing → B`, the next movement is `B − A`; a missing interval does not make the next detection automatically safe.
+If that movement reaches the threshold, it triggers an alert.
+
+Missing frames have blank coordinate fields in the CSV. Starting or stopping a recording does not reset the position reference.
+Starting a new monitoring run, requesting redetection, or changing the input dimensions resets it.
+
+### 5. View recordings and activity
+
+- Press **R** or click the record icon to start or stop a manual CSV recording.
+- Enable automatic recording from the game timer to use the configured start/end time ranges.
+- Open saved files with the **recordings folder** button on the left. Recordings contain data, not video.
+- The **activity log** below the character shows starts, stops, setting changes, saved recordings, and errors.
+- A played sound appears as `[14:30:12] (ᓀ‸ᓂ)`. Muting, disabled beeps, and sample playback do not produce sound entries.
+- The log keeps the latest 300 entries during the current run. Scroll to older entries, or select text and press Ctrl+C to copy. Changing language preserves the entries. Repeated capture errors are logged again only when their state changes.
+- The GitHub **usage guide** button opens this README.
+
+## Buttons and shortcuts
+
+Hover over an icon or focus it with the keyboard to see its action and shortcut.
+
+| Key | Action |
+| --- | --- |
+| R | Start or stop CSV recording |
+| M | Temporarily mute or unmute beeps |
+| C | Save images of the game timer region |
+| ESC | Stop monitoring |
+| D | Redetect the region and reset position references; save any active recording first |
+| F5 / Ctrl+R | Refresh the window list before monitoring |
+| S | Play or stop the sample before monitoring |
+
+The M button is disabled when the current mode's beep setting is off.
+R/M/C/D/S shortcuts do not run while editing text in a settings field or the activity log.
+The yellow button folds or expands the settings panel. The **Language** label stays in English in every language.
+
+## Saved files
+
+Files are stored relative to the executable's folder, or the repository folder when running from source.
+
+| Path | Contents |
+| --- | --- |
+| `config.json` | Selected windows, mode, language, and detection settings |
+| `azusa_record/` | Per-frame CSV files and `sessions_v2.csv` session summaries |
+| `assets/digits/calibration/` | Timer-region and digit images saved with C |
+
+On another PC, recheck window names, the OBS input, and the timer region.
+The bundled timer reader uses digit templates. Tesseract OCR is not included in the executable.
+
+## Troubleshooting
+
+- **Gray start button:** check the OBS/game selections and settings marked in red.
+- **No image or minimized source:** restore the OBS window and refresh with F5. Use D to redetect if needed.
+- **White dot not detected:** check that the dot is inside the black area. Tiny dots, large white panels, or multiple similarly sized white dots may be rejected.
+- **No sound:** check the mode's beep toggle, temporary mute, and Windows volume. Playback errors appear in the activity log.
+- **Executable blocked:** this unsigned build may be blocked by Windows application control. On managed PCs, ask the administrator for an approved build. In a development environment, use the source installation steps above.
+- **Recording could not be saved:** check folder write permissions and free disk space. Failed recordings remain available for a save retry.
+
+## Development and builds
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.\build.ps1
+```
+
+Output: `release/AzusaDetector.exe`, including UI artwork, the sample video, alert sound, and digit templates.
+
+Optional checks:
+
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\release\AzusaDetector.exe --self-test
 ```
 
-Q : quit<br>
-R : record<br>
-M : mute
+The self-test writes `self-test.json` to the application folder.
+Offline checks do not replace validation with real OBS/game input or a separate PC.
 
-pyinstaller --onefile --noconsole --add-data "alert.wav;." main.py
-> pyinstaller --onefile --add-data "alert.wav;." main.py
-## Version 0.0.1
-[24.07.17]<br>
-Library and threading usage has been changed.<br>
-Convenience features such as background recording, circle size adjustment, and coordinate logging have been added.
-
-1. <b>Improved screenshot capture speed</b> : Replaced pyautogui.screenshot() with mss.grab().
-2. <b>Constant optimization</b> : Frequently used values have been designated as constants.
-3. <b>Computation optimization</b> : Utilized NumPy array operations. 
-4. <b>Threading improvement</b> : Sound playback function now runs directly in a thread & notifications only sound when the state changes (switching inside/outside the circle). 
-5. <b>Default settings</b> : Set default values for 'Window/Radius' to the OBS window and 45. 
-6. <b>Background recording feature</b> : Background screen recording is now possible. 
-7. <b>Real-time circle size adjustment</b> : Adjust the circle size in real-time using the '+' and '-' keys while the program is running.
-8. <b>Coordinate logging</b> : Records time and coordinate positions.
-
----
-
-## Version 0.0.0
-- One-hour prototype DEMO version
-```
-pip install opencv-python
-pip install numpy
-pip install pygetwindow
-pip install pyautogui
-```
-
-### [Usage]
-- Run after OBS setup is completed.
-1. Select the screen to recognize (Enter the number)<br>- Detects a black box.<br> ![img_1.png](readme/img_1.png)<br><br><br>
-2. Specify the circle radius (Enter the number)<br>- Currently, you can manually enter the radius of the circle for testing. <br><br>![img_3.png](readme/img_3.png) <br>![img_2.png](readme/img_2.png)<br><br><br>
-3. If inside the black area and outside the yellow circle, display text and play a beep sound <br> ![img4.png](readme/img_4.png)
-4. Exit button: 'Q'
+@DevOrca18
