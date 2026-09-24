@@ -112,9 +112,25 @@ def build_setup(app, config, resource_path, circle_judge):
     app.record_section = SectionCard(form, t("기록"), "04")
     app.record_section.grid(row=3, column=0, sticky="ew")
     auto = app.record_section.content
+    auto.columnconfigure(0, weight=1)
     ttk.Checkbutton(auto, text=t("게임 타이머로 자동 기록"), variable=app.auto_enabled_var).grid(row=0, column=0, sticky="w")
-    cfg = config["auto"]
-    ttk.Label(auto, text=t("{a}–{b}초 시작 · {c}–{d}초 종료", a=cfg["start_band"][0], b=cfg["start_band"][1], c=cfg["end_band"][0], d=cfg["end_band"][1]), style="Hint.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+    end_modes = ttk.Frame(auto, style="Card.TFrame")
+    end_modes.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    end_modes.columnconfigure((0, 1), weight=1, uniform="auto_end")
+    app.auto_end_controls = []
+    for index, (label, value) in enumerate((("시간 지정", "duration"), ("타이머 감지", "timer"))):
+        control = ttk.Radiobutton(end_modes, text=t(label), value=value, variable=app.auto_end_mode_var)
+        control.grid(row=0, column=index, sticky="w")
+        app.auto_end_controls.append(control)
+    app.auto_duration_row = ttk.Frame(auto, style="Card.TFrame")
+    app.auto_duration_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    ttk.Label(app.auto_duration_row, text=t("기록 시간"), style="Section.TLabel").pack(side="left", padx=(0, 10))
+    app.auto_duration_entry = ttk.Entry(app.auto_duration_row, textvariable=app.auto_duration_var, width=6, justify="center")
+    app.auto_duration_entry.pack(side="left")
+    ttk.Label(app.auto_duration_row, text=t("초"), style="Hint.TLabel").pack(side="left", padx=(6, 0))
+    app.auto_hint = ttk.Label(auto, style="Hint.TLabel")
+    app.auto_hint.grid(row=3, column=0, sticky="w", pady=(8, 0))
+    app.update_auto_controls()
 
     footer = ttk.Frame(body, style="App.TFrame")
     footer.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 0))
@@ -127,7 +143,7 @@ def build_setup(app, config, resource_path, circle_judge):
                                               app.good_var, app.soso_var, app.circle_beep_var, app.delta_settings.enabled,
                                               app.delta_settings.guide_enabled, app.delta_settings.method,
                                               app.delta_settings.x_px, app.delta_settings.y_px, app.delta_settings.distance_px,
-                                              app.auto_enabled_var)]
+                                              app.auto_enabled_var, app.auto_end_mode_var, app.auto_duration_var)]
     app.update_connection_status()
 
     app.bind("<F5>", app.handle_refresh_shortcut)

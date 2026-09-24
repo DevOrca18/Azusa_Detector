@@ -62,12 +62,12 @@ class MonitorEngine:
         self.muted = False
         self.last_result = None
 
-    def finish_session(self):
+    def finish_session(self, now=None):
         if self.session is None:
             return
         # Clear only after successful persistence. Failed writes can be retried.
         result = self.backend.finish_recording(self.session, self.rectangle)
-        self.auto.record_stopped(result, time.time())
+        self.auto.record_stopped(result, time.monotonic() if now is None else now)
         self.last_result = result
         self.session = None
         self.log("기록 저장 · {grade} · 감지 {n}프레임 · 경고 {beeps}회",
@@ -87,6 +87,7 @@ class MonitorEngine:
             self.finish_session()
 
     def missing(self, now):
+        self.check_deadline(now)
         self.guide_origin = self.tracker.last_point
         self.timer_frame = None
         self.tracker.update(None, now)
@@ -96,16 +97,29 @@ class MonitorEngine:
         if self.running and self.session is not None and self.rectangle:
             self.session.add_frame(None, None, self.rectangle, False, self.tracker,
                                    self.config["detect"]["circle_enabled"], None)
-        # Missing timer frames must also end automatic recording after its grace period.
-        self.check_auto_finish(None)
+        # Fixed-duration runs keep recording through gaps and still expire on time.
+        self.check_auto_finish(None, now)
 
-    def check_auto_finish(self, seconds):
-        if self.running and self.auto.maybe_finish(seconds, time.time(), self.session is not None,
-                                                  self.session.source if self.session else None):
-            self.finish_session()
+    def check_auto_finish(self, seconds, now=None):
+        if not self.running:
+            return
+        now = time.monotonic() if now is None else now
+        reason = self.auto.maybe_finish(seconds, now, self.session is not None,
+                                       self.session.source if self.session else None)
+        if reason:
+            self.finish_session(now)
+            messages = {"duration elapsed": "자동 기록 종료 · 설정 시간 경과",
+                        "timer end": "자동 기록 종료 · 종료 타이머 감지",
+                        "timer lost": "자동 기록 종료 · 타이머 미감지"}
+            self.log(messages[reason])
+
+    def check_deadline(self, now):
+        if self.auto.end_mode == "duration":
+            self.check_auto_finish(None, now)
 
     def step(self, raw, game, now):
         app = self.backend
+        self.check_deadline(now)
         if self.shape is not None and self.shape != raw.shape:
             # A resized source changes its coordinate system; save the old session first.
             self.finish_session()
@@ -118,9 +132,12 @@ class MonitorEngine:
         self.seconds = None
         if game is not None:
             self.seconds, _, _ = self.timer.read_seconds(game, app.full_frame_rect(game), time.time())
-        if self.running and self.rectangle and self.auto.maybe_start(self.seconds, time.time(), self.session is not None):
+        if self.running and self.rectangle and self.auto.maybe_start(self.seconds, now, self.session is not None):
             self.session = app.SessionRecorder(self.config, "auto")
-            self.log("자동 기록 시작")
+            if self.auto.deadline is not None:
+                self.log("자동 기록 시작 · {seconds}초", seconds=self.config["auto"]["duration_sec"])
+            else:
+                self.log("자동 기록 시작")
         point = app.detect_white_point(raw, self.rectangle) if self.rectangle else None
         # Capture the previous valid point before update; gaps never reset it.
         self.guide_origin = self.tracker.last_point or point
@@ -143,7 +160,7 @@ class MonitorEngine:
             self.was_outside = self.outside
         if self.running and self.session is not None and self.rectangle:
             self.session.add_frame(self.outside, point, self.rectangle, beep, self.tracker, circle, self.feedback.over_threshold)
-        self.check_auto_finish(self.seconds)
+        self.check_auto_finish(self.seconds, now)
         if self.rectangle is None:
             return None
         x, y, w, h = self.rectangle
@@ -167,13 +184,19 @@ class MonitorEngine:
         return self.config["delta_feedback"]["enabled"]
 
     def snapshot(self):
+        now = time.monotonic()
+        auto_recording = self.session is not None and self.session.source == "auto"
+        elapsed = (self.backend.datetime.now() - self.session.start_time).total_seconds() if self.session else None
+        if auto_recording and self.auto.started_at is not None:
+            elapsed = max(0.0, now - self.auto.started_at)
         delta = self.tracker.delta
         return {"running": self.running, "recording": self.session is not None, "muted": self.muted,
                 "sound_enabled": self.sound_enabled(), "can_calibrate": self.timer_frame is not None,
                 "guide_origin": self.guide_origin, "guide": deepcopy(self.config["delta_feedback"]),
                 "detected": self.tracker.detected, "relative": self.tracker.relative, "delta": delta,
                 "distance": math.hypot(*delta) if delta else None, "gap": self.tracker.delta_seconds,
-                "rectangle": self.rectangle, "alert": self.alerting(time.monotonic()),
+                "rectangle": self.rectangle, "alert": self.alerting(now),
                 "circle": self.config["detect"]["circle_enabled"], "alert_delta": self.feedback.last_alert_delta,
                 "seconds": self.seconds, "result": self.last_result,
-                "elapsed": (self.backend.datetime.now() - self.session.start_time).total_seconds() if self.session else None}
+                "remaining": self.auto.remaining(now) if auto_recording else None,
+                "elapsed": elapsed}

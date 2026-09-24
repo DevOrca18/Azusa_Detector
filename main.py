@@ -38,6 +38,8 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "start_band": [55, 59],
         "end_band": [0, 1],
+        "end_mode": "duration",
+        "duration_sec": 60,
         "debounce_frames": 3,
         "grace_sec": 2.0,
         "cooldown_sec": 5.0,
@@ -152,6 +154,17 @@ def validate_band(value, default, warnings, name):
     return [low, high]
 
 
+def validate_recording_duration(value, warnings):
+    try:
+        seconds = float(value)
+        if not math.isfinite(seconds) or not seconds.is_integer() or not 1 <= seconds <= 3600:
+            raise ValueError()
+        return int(seconds)
+    except (TypeError, ValueError, OverflowError):
+        warnings.append("auto.duration_sec must be an integer from 1 to 3600; using default 60.")
+        return DEFAULT_CONFIG["auto"]["duration_sec"]
+
+
 def validate_timer_roi(value, warnings):
     default = DEFAULT_CONFIG["timer_roi"]
     if not isinstance(value, dict):
@@ -219,8 +232,14 @@ def validate_config(config):
 
     auto_default = DEFAULT_CONFIG["auto"]
     auto_config = merged["auto"] if isinstance(merged.get("auto"), dict) else {}
+    end_mode = auto_config.get("end_mode", auto_default["end_mode"])
+    if end_mode not in ("duration", "timer"):
+        warnings.append("auto.end_mode is invalid; using duration.")
+        end_mode = auto_default["end_mode"]
     merged["auto"] = {
         "enabled": coerce_bool(auto_config.get("enabled"), auto_default["enabled"], warnings, "auto.enabled"),
+        "end_mode": end_mode,
+        "duration_sec": validate_recording_duration(auto_config.get("duration_sec", auto_default["duration_sec"]), warnings),
         "start_band": validate_band(auto_config.get("start_band"), auto_default["start_band"], warnings, "auto.start_band"),
         "end_band": validate_band(auto_config.get("end_band"), auto_default["end_band"], warnings, "auto.end_band"),
         "debounce_frames": coerce_int(
@@ -357,7 +376,7 @@ class App(ttkthemes.ThemedTk):
         self.title("Azusa Detector")
         available_width = max(900, self.winfo_screenwidth() - 60)
         available_height = max(560, self.winfo_screenheight() - 90)
-        self.geometry(f"{min(1320, available_width)}x{min(860, available_height)}")
+        self.geometry(f"{min(1320, available_width)}x{min(920, available_height)}")
         self.minsize(min(1120, available_width), min(690, available_height))
         self.resizable(True, True)
 
@@ -375,6 +394,8 @@ class App(ttkthemes.ThemedTk):
         self.good_var = tk.StringVar(value=str(config["grading"]["good_max"]))
         self.soso_var = tk.StringVar(value=str(config["grading"]["soso_max"]))
         self.auto_enabled_var = tk.BooleanVar(value=config["auto"]["enabled"])
+        self.auto_end_mode_var = tk.StringVar(value=config["auto"]["end_mode"])
+        self.auto_duration_var = tk.StringVar(value=str(config["auto"]["duration_sec"]))
         self.status_var = tk.StringVar()
         self.phase_var = tk.StringVar(value=t("미리보기"))
         self.monitor_running = False
@@ -514,6 +535,14 @@ class App(ttkthemes.ThemedTk):
             config["detect"]["circle_radius"] = self.radius_var.get()
             config["grading"] = {"good_max": self.good_var.get(), "soso_max": self.soso_var.get()}
         config["auto"]["enabled"] = self.auto_enabled_var.get()
+        config["auto"]["end_mode"] = self.auto_end_mode_var.get()
+        if config["auto"]["enabled"] and config["auto"]["end_mode"] == "duration":
+            config["auto"]["duration_sec"] = self.auto_duration_var.get()
+        else:
+            inactive_warnings = []
+            duration = validate_recording_duration(self.auto_duration_var.get(), inactive_warnings)
+            if not inactive_warnings:
+                config["auto"]["duration_sec"] = duration
         delta = self.delta_settings.export()
         # Hidden controls never block live monitoring. Retain their last valid values.
         active = {"x_px", "y_px"} if delta["method"] == "axes" else {"distance_px"}
@@ -541,6 +570,7 @@ class App(ttkthemes.ThemedTk):
 
     def settings_changed(self, *_):
         self._settings_cache = None
+        self.update_auto_controls()
         self.update_connection_status()
         if self._settings_log_after is not None:
             self.after_cancel(self._settings_log_after)
@@ -559,7 +589,8 @@ class App(ttkthemes.ThemedTk):
                   ("delta_feedback", "guide_enabled", "측정 가이드"), ("delta_feedback", "method", "판정 방식"),
                   ("delta_feedback", "x_px", "X"), ("delta_feedback", "y_px", "Y"),
                   ("delta_feedback", "distance_px", "합산 거리"), ("grading", "good_max", "GOOD"),
-                  ("grading", "soso_max", "SOSO"), ("auto", "enabled", "자동 기록"))
+                  ("grading", "soso_max", "SOSO"), ("auto", "enabled", "자동 기록"),
+                  ("auto", "end_mode", "자동 종료"), ("auto", "duration_sec", "기록 시간"))
         for group, key, label in fields:
             value = current[group][key]
             if value == self._logged_settings.get(group, {}).get(key):
@@ -571,6 +602,9 @@ class App(ttkthemes.ThemedTk):
             elif key == "method":
                 values.pop("value")
                 values["value_key"] = "X · Y 개별" if value == "axes" else "합산 거리"
+            elif key == "end_mode":
+                values.pop("value")
+                values["value_key"] = "시간 지정" if value == "duration" else "타이머 감지"
             self.activity.emit("설정 · {name}: {value}", **values)
         self._logged_settings = deepcopy(current)
 
@@ -620,6 +654,12 @@ class App(ttkthemes.ThemedTk):
             entry.configure(style="TEntry" if valid_grade else "Invalid.TEntry")
         if not valid_grade:
             invalid_fields.append("0 < GOOD < SOSO < 1")
+        duration_warnings = []
+        if self.auto_enabled_var.get() and self.auto_end_mode_var.get() == "duration":
+            validate_recording_duration(self.auto_duration_var.get(), duration_warnings)
+        self.auto_duration_entry.configure(style="Invalid.TEntry" if duration_warnings else "TEntry")
+        if duration_warnings:
+            invalid_fields.append(t("기록 시간 · 1–3600초"))
         if invalid_fields:
             errors["values"] = t("판정 설정값 확인") + ": " + ", ".join(invalid_fields)
         if hasattr(self, "input_error_var"):
@@ -667,6 +707,23 @@ class App(ttkthemes.ThemedTk):
         self.last_source_available = available
         self.update_connection_status()
 
+    def update_auto_controls(self):
+        if not hasattr(self, "auto_end_controls"):
+            return
+        enabled = self.auto_enabled_var.get()
+        editable = enabled and not (self.monitor_running or self.monitor_pending)
+        for control in self.auto_end_controls:
+            control.state(["!disabled"] if editable else ["disabled"])
+        self.auto_duration_entry.state(["!disabled"] if editable else ["disabled"])
+        if self.auto_end_mode_var.get() == "duration":
+            self.auto_duration_row.grid() if enabled else self.auto_duration_row.grid_remove()
+            hint = t("시작 감지 {a}–{b}초", a=self.config_data["auto"]["start_band"][0], b=self.config_data["auto"]["start_band"][1])
+        else:
+            self.auto_duration_row.grid_remove()
+            cfg = self.config_data["auto"]
+            hint = t("{a}–{b}초 시작 · {c}–{d}초 종료", a=cfg["start_band"][0], b=cfg["start_band"][1], c=cfg["end_band"][0], d=cfg["end_band"][1])
+        self.auto_hint.configure(text=hint)
+
     def set_monitor_controls(self):
         running = self.monitor_running or self.monitor_pending
         for control in (self.obs_window_combo, self.game_window_combo, self.language_combo):
@@ -674,6 +731,7 @@ class App(ttkthemes.ThemedTk):
         for control in self.mode_controls:
             control.state(["disabled"] if running else ["!disabled"])
         self.refresh_button.state(["disabled"] if running else ["!disabled"])
+        self.update_auto_controls()
         self.phase_var.set(t("모니터링 중") if self.monitor_running else t("미리보기"))
         self.start_button.configure(text=t("모니터링 종료" if self.monitor_running else "모니터링 시작") + ("   ■" if self.monitor_running else "   →"))
         self.live_preview.update_actions()
@@ -1074,6 +1132,9 @@ class AutoStateMachine:
         self.cooldown_until = 0.0
         self.last_grade = None
         self.last_seconds = None
+        self.end_mode = self.config.get("end_mode", "duration")
+        self.started_at = None
+        self.deadline = None
 
     @property
     def enabled(self):
@@ -1114,6 +1175,9 @@ class AutoStateMachine:
             self.start_hits = 0
             self.end_hits = 0
             self.last_seen_at = now
+            self.end_mode = self.config.get("end_mode", "duration")
+            self.started_at = now
+            self.deadline = now + self.config.get("duration_sec", 60) if self.end_mode == "duration" else None
             return True
         return False
 
@@ -1128,6 +1192,11 @@ class AutoStateMachine:
         if self.state != self.RECORDING or not is_recording or recording_source != "auto":
             return None
 
+        # A fixed deadline ignores both end digits and any gaps in timer capture.
+        # Capture this once at start so setting changes cannot alter an active run.
+        if self.end_mode == "duration":
+            return "duration elapsed" if self.deadline is not None and now >= self.deadline else None
+
         if timer_seconds is not None:
             self.last_seen_at = now
             if self.in_band(timer_seconds, "end_band"):
@@ -1141,6 +1210,11 @@ class AutoStateMachine:
 
         return None
 
+    def remaining(self, now):
+        if self.state == self.RECORDING and self.deadline is not None:
+            return max(0.0, self.deadline - now)
+        return None
+
     def record_stopped(self, result, now):
         if not self.enabled:
             return
@@ -1150,6 +1224,8 @@ class AutoStateMachine:
             self.last_grade = result["grade"] if result else None
             self.start_hits = 0
             self.end_hits = 0
+            self.started_at = None
+            self.deadline = None
 
     def label(self, session):
         if not self.enabled:

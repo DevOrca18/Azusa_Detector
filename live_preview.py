@@ -1,5 +1,6 @@
 """Embedded preview/live dashboard; capture runs off Tk's UI thread."""
 import queue
+import math
 import os
 import win32process
 import threading
@@ -127,6 +128,7 @@ class CaptureWorker:
                             self.events.put(("saved", path))
                         handling_command = False
                     engine.configure(config)
+                    engine.check_deadline(time.monotonic())
                     if not active and not engine.running and not self.sample_playing:
                         time.sleep(0.08)
                         continue
@@ -326,7 +328,13 @@ class LivePreview(ttk.Frame):
             recording = state["recording"]
             if recording:
                 minutes, seconds = divmod(int(state["elapsed"]), 60)
-                self.record_state.set("● " + t("기록 중 {time}", time=f"{minutes:02d}:{seconds:02d}"))
+                elapsed = f"{minutes:02d}:{seconds:02d}"
+                if state.get("remaining") is not None:
+                    remaining_minutes, remaining_seconds = divmod(math.ceil(state["remaining"]), 60)
+                    self.record_state.set("● " + t("자동 기록 {time} · 남은 {remaining}", time=elapsed,
+                                                   remaining=f"{remaining_minutes:02d}:{remaining_seconds:02d}"))
+                else:
+                    self.record_state.set("● " + t("기록 중 {time}", time=elapsed))
             else:
                 self.record_state.set(t("기록 대기") if state["running"] else t("미리보기 · 기록/소리 없음"))
             if state["result"]:
