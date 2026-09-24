@@ -1,9 +1,10 @@
 import csv
 import json
+import math
 import os
 import sys
-import threading
 import time
+import winsound
 import tkinter as tk
 from copy import deepcopy
 from ctypes import windll
@@ -18,11 +19,19 @@ import win32con
 import win32gui
 import win32ui
 
+from delta_feedback import DEFAULT_DELTA, PREVIEW_PRESETS, DeltaFeedback, threshold_label
+from setup_view import build_setup
+from ui_theme import bgr, configure_theme
+from localization import LANGUAGES, get_language, set_language, t, overlay_text
+import unicode_text
+from activity_log import ActivityLog
+
 
 WHITE_THRESHOLD_LOW = np.array([0, 0, 200])
 WHITE_THRESHOLD_HIGH = np.array([180, 25, 255])
 
 DEFAULT_CONFIG = {
+    "language": "ko",
     "windows": {"obs_title": "", "game_title": ""},
     "grading": {"good_max": 0.05, "soso_max": 0.15},
     "auto": {
@@ -35,7 +44,8 @@ DEFAULT_CONFIG = {
         "ocr_fallback": False,
     },
     "timer_roi": {"x_ratio": 0.42, "y_ratio": -0.98, "w_ratio": 0.13, "h_ratio": 0.08},
-    "detect": {"circle_radius": 45},
+    "detect": {"circle_radius": 45, "circle_enabled": False, "circle_beep_enabled": True},
+    "delta_feedback": DEFAULT_DELTA.copy(),
 }
 
 DIGIT_CANDIDATE_SCORE_MIN = 0.25
@@ -53,8 +63,9 @@ else:
 
 def hide_console():
     try:
-        console_window = win32gui.GetForegroundWindow()
-        win32gui.ShowWindow(console_window, win32con.SW_HIDE)
+        console_window = windll.kernel32.GetConsoleWindow()
+        if console_window:
+            win32gui.ShowWindow(console_window, win32con.SW_HIDE)
     except Exception:
         pass
 
@@ -180,6 +191,8 @@ def validate_windows_config(value, warnings):
 def validate_config(config):
     warnings = []
     merged = deep_merge(DEFAULT_CONFIG, config)
+    if merged.get("language") not in LANGUAGES:
+        merged["language"] = "ko"
 
     merged["windows"] = validate_windows_config(merged.get("windows"), warnings)
 
@@ -236,15 +249,61 @@ def validate_config(config):
     detect_default = DEFAULT_CONFIG["detect"]
     detect_config = merged["detect"] if isinstance(merged.get("detect"), dict) else {}
     merged["detect"] = {
+        "circle_beep_enabled": coerce_bool(
+            detect_config.get("circle_beep_enabled", True), True, warnings, "detect.circle_beep_enabled"
+        ),
         "circle_radius": coerce_int(
             detect_config.get("circle_radius"),
             detect_default["circle_radius"],
             warnings,
             "detect.circle_radius",
             minimum=1,
-        )
+        ),
+        "circle_enabled": coerce_bool(
+            detect_config.get("circle_enabled"),
+            detect_default["circle_enabled"],
+            warnings,
+            "detect.circle_enabled",
+        ),
     }
 
+    if merged["detect"]["circle_radius"] > 1_000_000:
+        warnings.append("detect.circle_radius exceeds 1000000; using default.")
+        merged["detect"]["circle_radius"] = detect_default["circle_radius"]
+
+    delta = merged.get("delta_feedback")
+    delta = delta if isinstance(delta, dict) else {}
+    method = delta.get("method", "axes")
+    if method not in ("axes", "distance"):
+        warnings.append("delta_feedback.method must be axes or distance; using axes.")
+        method = "axes"
+    checked_delta = {
+        "enabled": coerce_bool(delta.get("enabled", False), False, warnings, "delta_feedback.enabled"),
+        "guide_enabled": coerce_bool(delta.get("guide_enabled", False), False, warnings, "delta_feedback.guide_enabled"),
+        "method": method,
+    }
+    for key in ("x_px", "y_px", "distance_px"):
+        value = coerce_float(delta.get(key, DEFAULT_DELTA[key]), DEFAULT_DELTA[key], warnings, f"delta_feedback.{key}")
+        if not math.isfinite(value) or not 0 < value <= 1_000_000:
+            warnings.append(f"delta_feedback.{key} must be positive and finite; using {DEFAULT_DELTA[key]}.")
+            value = DEFAULT_DELTA[key]
+        checked_delta[key] = value
+    for key in ("preview_width", "preview_height"):
+        value = coerce_int(delta.get(key, DEFAULT_DELTA[key]), DEFAULT_DELTA[key], warnings, f"delta_feedback.{key}", minimum=1)
+        if value > 100_000:
+            warnings.append(f"delta_feedback.{key} is too large; using {DEFAULT_DELTA[key]}.")
+            value = DEFAULT_DELTA[key]
+        checked_delta[key] = value
+    preview_source = delta.get("preview_source", "preset")
+    if preview_source not in ("preset", "custom", "obs"):
+        warnings.append("delta_feedback.preview_source must be preset, custom or obs; using custom.")
+        preview_source = "custom"
+    # Old versions stored arbitrary OBS/sample sizes without a source selector.
+    # Preserve those dimensions instead of forcing them into a 16:9 preset.
+    if preview_source == "preset" and (checked_delta["preview_width"], checked_delta["preview_height"]) not in PREVIEW_PRESETS.values():
+        preview_source = "custom"
+    checked_delta["preview_source"] = preview_source
+    merged["delta_feedback"] = checked_delta
     merged["timer_roi"] = validate_timer_roi(merged.get("timer_roi"), warnings)
     return merged, warnings
 
@@ -285,10 +344,21 @@ class App(ttkthemes.ThemedTk):
 
         self.config_data = config
         self.config_warnings = config_warnings
+        set_language(config.get("language", "ko"))
+        self.language_var = tk.StringVar(value=LANGUAGES[get_language()])
+        self.activity = ActivityLog()
+        self._settings_cache = None
+        self._settings_log_after = None
+        self._logged_settings = deepcopy(config)
+        self.activity.emit("프로그램 시작")
+        for warning in config_warnings:
+            self.activity.emit("오류: {error}", "error", error=warning)
 
         self.title("Azusa Detector")
-        self.geometry("520x520")
-        self.minsize(500, 500)
+        available_width = max(900, self.winfo_screenwidth() - 60)
+        available_height = max(560, self.winfo_screenheight() - 90)
+        self.geometry(f"{min(1320, available_width)}x{min(860, available_height)}")
+        self.minsize(min(1120, available_width), min(690, available_height))
         self.resizable(True, True)
 
         self.configure(background="#20242b")
@@ -298,197 +368,120 @@ class App(ttkthemes.ThemedTk):
         self.obs_window_var = tk.StringVar(value=config["windows"].get("obs_title", ""))
         self.game_window_var = tk.StringVar(value=config["windows"].get("game_title", ""))
         self.radius_var = tk.StringVar(value=str(config["detect"]["circle_radius"]))
+        self.circle_beep_var = tk.BooleanVar(value=config["detect"].get("circle_beep_enabled", True))
+        self.monitor_mode_var = tk.StringVar(value="circle" if config["detect"]["circle_enabled"] else "position")
+        self.mode_hint_var = tk.StringVar()
+        self.circle_controls = []
         self.good_var = tk.StringVar(value=str(config["grading"]["good_max"]))
         self.soso_var = tk.StringVar(value=str(config["grading"]["soso_max"]))
         self.auto_enabled_var = tk.BooleanVar(value=config["auto"]["enabled"])
-        self.status_var = tk.StringVar(value="Ready")
+        self.status_var = tk.StringVar()
+        self.phase_var = tk.StringVar(value=t("미리보기"))
+        self.monitor_running = False
+        self.monitor_pending = False
+        self.closing = False
+        self.settings_visible = True
+        self.required_errors = {}
+        self.protocol("WM_DELETE_WINDOW", self.close_app)
 
-        main_frame = ttk.Frame(self, padding=(18, 16, 18, 14), style="App.TFrame")
-        main_frame.grid(row=0, column=0, sticky=tk.NSEW)
-        main_frame.columnconfigure(0, weight=1)
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        build_setup(self, config, resource_path, judge_circle)
 
-        ttk.Label(main_frame, text="Azusa Detector", style="Title.TLabel").grid(
-            row=0, column=0, sticky=tk.W, pady=(0, 14)
-        )
+    def change_language(self, event=None):
+        language = next(code for code, label in LANGUAGES.items() if label == self.language_var.get())
+        if language == get_language():
+            return
+        self.config_data["delta_feedback"] = self.delta_settings.export()
+        expanded = self.settings_visible
+        sample_playing = self.live_preview.sample_playing
+        if self._settings_log_after is not None:
+            self.after_cancel(self._settings_log_after)
+            self._settings_log_after = None
+        self.live_preview.dispose()
+        self.delta_settings.dispose()
+        for variable, token in self.connection_traces:
+            variable.trace_remove("write", token)
+        for child in self.winfo_children():
+            child.destroy()
+        self.circle_controls = []
+        self.config_data["language"] = language
+        set_language(language)
+        self._settings_cache = None
+        self.phase_var.set(t("미리보기"))
+        self.configure_styles()
+        saved, _ = load_config()
+        saved["language"] = language
+        save_config(saved)
+        build_setup(self, self.config_data, resource_path, judge_circle)
+        self.activity.emit("설정 · {name}: {value}", name="Language", value=LANGUAGES[language])
+        if sample_playing:
+            self.live_preview.invoke_action("sample")
+        if not expanded:
+            self.toggle_settings()
 
-        window_section = ttk.LabelFrame(main_frame, text="Windows", style="Section.TLabelframe")
-        window_section.grid(row=1, column=0, sticky=tk.EW)
-        window_section.columnconfigure(1, weight=1)
-        ttk.Label(window_section, text="OBS", style="Section.TLabel").grid(
-            row=0, column=0, sticky=tk.W, padx=(12, 10), pady=(12, 6)
-        )
-        self.obs_window_combo = ttk.Combobox(window_section, textvariable=self.obs_window_var, state="readonly")
-        self.obs_window_combo.grid(row=0, column=1, sticky=tk.EW, padx=(0, 8), pady=(12, 6))
-        ttk.Label(window_section, text="Game", style="Section.TLabel").grid(
-            row=1, column=0, sticky=tk.W, padx=(12, 10), pady=(0, 12)
-        )
-        self.game_window_combo = ttk.Combobox(window_section, textvariable=self.game_window_var, state="readonly")
-        self.game_window_combo.grid(row=1, column=1, sticky=tk.EW, padx=(0, 8), pady=(0, 12))
-        ttk.Button(window_section, text="Refresh", command=self.refresh_windows, width=10).grid(
-            row=0, column=2, rowspan=2, sticky=tk.E, padx=(0, 12), pady=12
-        )
-        self.refresh_windows(update_status=False)
+    def destroy(self):
+        if self._settings_log_after is not None:
+            self.after_cancel(self._settings_log_after)
+            self._settings_log_after = None
+        if hasattr(self, "live_preview"):
+            self.live_preview.dispose()
+        if hasattr(self, "delta_settings"):
+            self.delta_settings.dispose()
+        super().destroy()
 
-        detect_section = ttk.LabelFrame(main_frame, text="Detection", style="Section.TLabelframe")
-        detect_section.grid(row=2, column=0, sticky=tk.EW, pady=(12, 0))
-        detect_section.columnconfigure(1, weight=1)
-        ttk.Label(detect_section, text="Circle radius", style="Section.TLabel").grid(
-            row=0, column=0, sticky=tk.W, padx=(12, 10), pady=12
-        )
-        ttk.Entry(detect_section, textvariable=self.radius_var, width=8, justify=tk.CENTER).grid(
-            row=0, column=1, sticky=tk.W, pady=12
-        )
-        ttk.Button(detect_section, text="-", command=self.decrease_radius, width=3).grid(
-            row=0, column=2, padx=(8, 4), pady=12
-        )
-        ttk.Button(detect_section, text="+", command=self.increase_radius, width=3).grid(
-            row=0, column=3, padx=(0, 12), pady=12
-        )
+    def report_callback_exception(self, exc, value, traceback):
+        if hasattr(self, "activity"):
+            self.activity.emit("오류: {error}", "error", error=f"{exc.__name__}: {value}")
+            if hasattr(self, "brand_rail") and not self.closing:
+                self.brand_rail.log_view.append(self.activity.drain())
+        super().report_callback_exception(exc, value, traceback)
 
-        grading_section = ttk.LabelFrame(main_frame, text="Grading", style="Section.TLabelframe")
-        grading_section.grid(row=3, column=0, sticky=tk.EW, pady=(12, 0))
-        grading_section.columnconfigure(1, weight=1)
-        grading_section.columnconfigure(3, weight=1)
-        ttk.Label(grading_section, text="GOOD max", style="Section.TLabel").grid(
-            row=0, column=0, sticky=tk.W, padx=(12, 8), pady=12
+    def update_mode_controls(self):
+        circle_enabled = self.monitor_mode_var.get() == "circle"
+        for control in self.circle_controls:
+            control.state(["!disabled"] if circle_enabled else ["disabled"])
+        self.mode_hint_var.set(
+            t("고정된 원 기준 이탈 감지 · 채점")
+            if circle_enabled else t("마지막 정상 감지 좌표와 비교")
         )
-        ttk.Entry(grading_section, textvariable=self.good_var, width=10, justify=tk.CENTER).grid(
-            row=0, column=1, sticky=tk.W, pady=12
-        )
-        ttk.Label(grading_section, text="SOSO max", style="Section.TLabel").grid(
-            row=0, column=2, sticky=tk.W, padx=(18, 8), pady=12
-        )
-        ttk.Entry(grading_section, textvariable=self.soso_var, width=10, justify=tk.CENTER).grid(
-            row=0, column=3, sticky=tk.W, padx=(0, 12), pady=12
-        )
+        self.delta_settings.set_mode(self.monitor_mode_var.get())
+        if circle_enabled:
+            self.delta_settings.controls.grid_remove()
+            self.detect_section.grid()
+            self.grading_section.grid()
+        else:
+            self.detect_section.grid_remove()
+            self.grading_section.grid_remove()
+            self.delta_settings.controls.grid()
 
-        auto_section = ttk.LabelFrame(main_frame, text="Auto Timer", style="Section.TLabelframe")
-        auto_section.grid(row=4, column=0, sticky=tk.EW, pady=(12, 0))
-        ttk.Checkbutton(auto_section, text="Enable auto start/finish", variable=self.auto_enabled_var).grid(
-            row=0, column=0, sticky=tk.W, padx=12, pady=(12, 4)
-        )
-        auto_cfg = config["auto"]
-        auto_hint = (
-            f"Starts at {auto_cfg['start_band'][0]}-{auto_cfg['start_band'][1]}s, "
-            f"ends at {auto_cfg['end_band'][0]}-{auto_cfg['end_band'][1]}s or timer lost "
-            f"({auto_cfg['grace_sec']:.0f}s). Bands: config.json"
-        )
-        ttk.Label(auto_section, text=auto_hint, style="Hint.TLabel").grid(
-            row=1, column=0, sticky=tk.W, padx=12, pady=(0, 10)
-        )
-
-        ttk.Button(main_frame, text="Start Monitoring", command=self.start_monitoring, style="Primary.TButton").grid(
-            row=5, column=0, sticky=tk.EW, pady=(16, 8), ipady=4
-        )
-
-        ttk.Label(main_frame, textvariable=self.status_var, style="Status.TLabel").grid(row=6, column=0, sticky=tk.W)
-
-        self.bind("<F5>", self.handle_refresh_shortcut)
-        self.bind("<Control-r>", self.handle_refresh_shortcut)
-        self.bind("<Control-R>", self.handle_refresh_shortcut)
-
-        if self.config_warnings:
-            self.after(250, self.show_config_warnings)
+    def preview_source_size(self):
+        title = self.obs_window_var.get().strip()
+        hwnd = win32gui.FindWindow(None, title) if title else 0
+        if not hwnd:
+            raise ValueError(t("OBS 창 선택"))
+        if win32gui.IsIconic(hwnd):
+            raise ValueError(t("OBS 창 최소화 해제"))
+        raw = cv2.cvtColor(capture_window(hwnd), cv2.COLOR_BGRA2BGR)
+        rectangle, _ = detect_black_rectangle(raw)
+        if rectangle is None:
+            raise ValueError(t("검은 감지 영역 없음"))
+        return rectangle[2], rectangle[3]
 
     def configure_styles(self):
-        bg = "#20242b"
-        panel = "#292f38"
-        panel_border = "#3a414d"
-        text = "#e6eaf0"
-        muted = "#aab3c2"
-        accent = "#57c7ff"
-        accent_active = "#74d2ff"
-        field = "#171b21"
-
-        self.option_add("*Font", ("Segoe UI", 10))
-        self.option_add("*TCombobox*Listbox.background", field)
-        self.option_add("*TCombobox*Listbox.foreground", text)
-        self.option_add("*TCombobox*Listbox.selectBackground", "#2f6f95")
-        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
-
-        self.style.configure(".", font=("Segoe UI", 10), background=bg, foreground=text)
-        self.style.configure("App.TFrame", background=bg)
-        self.style.configure("TLabel", background=bg, foreground=text)
-        self.style.configure("Section.TLabel", background=panel, foreground=text)
-        self.style.configure("Title.TLabel", background=bg, foreground="#ffffff", font=("Segoe UI", 18, "bold"))
-        self.style.configure("Status.TLabel", background=bg, foreground=muted, font=("Segoe UI", 9))
-        self.style.configure("Hint.TLabel", background=panel, foreground=muted, font=("Segoe UI", 9))
-
-        self.style.configure(
-            "Section.TLabelframe",
-            background=panel,
-            bordercolor=panel_border,
-            relief=tk.SOLID,
-        )
-        self.style.configure(
-            "Section.TLabelframe.Label",
-            background=bg,
-            foreground=muted,
-            font=("Segoe UI", 10, "bold"),
-        )
-        self.style.configure("TCheckbutton", background=panel, foreground=text)
-        self.style.map("TCheckbutton", background=[("active", panel)], foreground=[("disabled", "#707782")])
-
-        self.style.configure(
-            "TEntry",
-            fieldbackground=field,
-            foreground=text,
-            insertcolor=text,
-            bordercolor=panel_border,
-            lightcolor=panel_border,
-            darkcolor=panel_border,
-        )
-        self.style.configure(
-            "TCombobox",
-            fieldbackground=field,
-            background=field,
-            foreground=text,
-            arrowcolor=muted,
-            bordercolor=panel_border,
-            lightcolor=panel_border,
-            darkcolor=panel_border,
-        )
-        self.style.map(
-            "TCombobox",
-            fieldbackground=[("readonly", field), ("focus", field)],
-            foreground=[("readonly", text)],
-            selectbackground=[("readonly", field)],
-            selectforeground=[("readonly", text)],
-        )
-
-        self.style.configure("TButton", background="#343b46", foreground=text, bordercolor="#444c59", padding=(10, 5))
-        self.style.map(
-            "TButton",
-            background=[("active", "#3d4653"), ("pressed", "#2b313b")],
-            foreground=[("disabled", "#777f8b")],
-        )
-        self.style.configure(
-            "Primary.TButton",
-            background=accent,
-            foreground="#10151b",
-            bordercolor=accent,
-            font=("Segoe UI", 11, "bold"),
-            padding=(12, 7),
-        )
-        self.style.map(
-            "Primary.TButton",
-            background=[("active", accent_active), ("pressed", "#40b7ee")],
-            foreground=[("active", "#10151b"), ("pressed", "#10151b")],
-        )
+        configure_theme(self)
 
     def show_config_warnings(self):
         messagebox.showwarning("Azusa Detector config", "\n".join(self.config_warnings))
 
     def handle_refresh_shortcut(self, event=None):
-        self.refresh_windows()
+        if not self.monitor_running and not self.monitor_pending:
+            self.refresh_windows()
         return "break"
 
     def refresh_windows(self, update_status=True):
         previous_obs_title = self.obs_window_var.get()
         previous_game_title = self.game_window_var.get()
-        window_titles = [title for title in gw.getAllTitles() if title]
+        window_titles = list(dict.fromkeys(title for title in gw.getAllTitles() if title and not title.startswith(
+            ("Azusa Detector", "Codex Computer Use", "ChatGPT is using your computer")) and title != "Program Manager"))
         self.obs_window_combo["values"] = window_titles
         self.game_window_combo["values"] = window_titles
 
@@ -497,24 +490,246 @@ class App(ttkthemes.ThemedTk):
             self.obs_window_var.set(previous_obs_title)
         elif obs_windows:
             self.obs_window_var.set(obs_windows[0])
-        elif window_titles:
-            self.obs_window_var.set(window_titles[0])
         else:
             self.obs_window_var.set("")
 
         if previous_game_title in window_titles:
             self.game_window_var.set(previous_game_title)
         else:
-            non_obs_windows = [title for title in window_titles if title not in obs_windows]
-            if non_obs_windows:
-                self.game_window_var.set(non_obs_windows[0])
-            elif window_titles:
-                self.game_window_var.set(window_titles[0])
-            else:
-                self.game_window_var.set("")
+            self.game_window_var.set("")
 
         if update_status:
-            self.status_var.set(f"Window list refreshed ({len(window_titles)} found)")
+            self.update_connection_status()
+
+    def read_settings(self):
+        if self._settings_cache is not None:
+            return self._settings_cache
+        config = deepcopy(self.config_data)
+        circle = self.monitor_mode_var.get() == "circle"
+        config["language"] = get_language()
+        config["windows"] = {"obs_title": self.obs_window_var.get().strip(), "game_title": self.game_window_var.get().strip()}
+        config["detect"]["circle_enabled"] = circle
+        config["detect"]["circle_beep_enabled"] = self.circle_beep_var.get()
+        if circle:
+            config["detect"]["circle_radius"] = self.radius_var.get()
+            config["grading"] = {"good_max": self.good_var.get(), "soso_max": self.soso_var.get()}
+        config["auto"]["enabled"] = self.auto_enabled_var.get()
+        delta = self.delta_settings.export()
+        # Hidden controls never block live monitoring. Retain their last valid values.
+        active = {"x_px", "y_px"} if delta["method"] == "axes" else {"distance_px"}
+        for key in ("x_px", "y_px", "distance_px"):
+            if circle or key not in active or not (delta["enabled"] or delta["guide_enabled"]):
+                try:
+                    value = float(delta[key])
+                    if not math.isfinite(value) or value <= 0 or value > 1_000_000:
+                        raise ValueError()
+                except ValueError:
+                    delta[key] = DEFAULT_DELTA[key]
+        # Preserve legacy dimensions without letting them block the live-only UI.
+        for key in ("preview_width", "preview_height"):
+            try:
+                if not 1 <= int(delta[key]) <= 100_000:
+                    raise ValueError()
+            except ValueError:
+                delta[key] = DEFAULT_DELTA[key]
+        config["delta_feedback"] = delta
+        checked, warnings = validate_config(config)
+        if warnings:
+            raise ValueError(t("입력값 확인"))
+        self._settings_cache = checked
+        return checked
+
+    def settings_changed(self, *_):
+        self._settings_cache = None
+        self.update_connection_status()
+        if self._settings_log_after is not None:
+            self.after_cancel(self._settings_log_after)
+        self._settings_log_after = self.after(450, self.log_settings)
+
+    def log_settings(self):
+        self._settings_log_after = None
+        try:
+            current = self.read_settings()
+        except ValueError:
+            self.activity.emit("판정 설정값 확인", "error")
+            return
+        fields = (("windows", "obs_title", "OBS 화면"), ("windows", "game_title", "게임 창"),
+                  ("detect", "circle_enabled", "모니터링 방식"), ("detect", "circle_radius", "원 반지름"),
+                  ("detect", "circle_beep_enabled", "원형 비프음"), ("delta_feedback", "enabled", "이동량 비프음"),
+                  ("delta_feedback", "guide_enabled", "측정 가이드"), ("delta_feedback", "method", "판정 방식"),
+                  ("delta_feedback", "x_px", "X"), ("delta_feedback", "y_px", "Y"),
+                  ("delta_feedback", "distance_px", "합산 거리"), ("grading", "good_max", "GOOD"),
+                  ("grading", "soso_max", "SOSO"), ("auto", "enabled", "자동 기록"))
+        for group, key, label in fields:
+            value = current[group][key]
+            if value == self._logged_settings.get(group, {}).get(key):
+                continue
+            values = {"name_key": label, "value": "ON" if value is True else "OFF" if value is False else value}
+            if key == "circle_enabled":
+                values.pop("value")
+                values["value_key"] = "원형 판정" if value else "위치 추적"
+            elif key == "method":
+                values.pop("value")
+                values["value_key"] = "X · Y 개별" if value == "axes" else "합산 거리"
+            self.activity.emit("설정 · {name}: {value}", **values)
+        self._logged_settings = deepcopy(current)
+
+    def update_connection_status(self, *_):
+        if not hasattr(self, "delta_settings") or not hasattr(self, "start_button"):
+            return
+        errors = {}
+        for key, variable, combo in (("obs", self.obs_window_var, self.obs_window_combo), ("game", self.game_window_var, self.game_window_combo)):
+            title = variable.get().strip()
+            if not title:
+                errors[key] = t("필수 · 창 선택")
+            elif not win32gui.FindWindow(None, title):
+                errors[key] = t("창 없음 · 다시 선택")
+            combo.configure(style="Invalid.TCombobox" if key in errors else "TCombobox")
+            if hasattr(self, "required_labels"):
+                label = self.required_labels[key]
+                label.configure(text=errors.get(key, ""))
+                label.grid() if key in errors else label.grid_remove()
+        try:
+            self.read_settings()
+        except ValueError:
+            errors["values"] = t("판정 설정값 확인")
+        invalid_fields = []
+        circle = self.monitor_mode_var.get() == "circle"
+        fields = [(self.radius_entry, self.radius_var, t("원 반지름"), circle, True)]
+        delta = self.delta_settings
+        for entry, variable, name, method in ((delta.x_entry, delta.x_px, "X", "axes"),
+                                             (delta.y_entry, delta.y_px, "Y", "axes"),
+                                             (delta.distance_entry, delta.distance_px, "px", "distance")):
+            fields.append((entry, variable, name, not circle and (delta.enabled.get() or delta.guide_enabled.get()) and delta.method.get() == method, False))
+        for entry, variable, name, active, integer in fields:
+            valid = True
+            if active:
+                try:
+                    number = int(variable.get()) if integer else float(variable.get())
+                    valid = math.isfinite(number) and 0 < number <= 1_000_000
+                except ValueError:
+                    valid = False
+            entry.configure(style="TEntry" if valid else "Invalid.TEntry")
+            if not valid:
+                invalid_fields.append(name)
+        try:
+            valid_grade = not circle or 0 < float(self.good_var.get()) < float(self.soso_var.get()) < 1
+        except ValueError:
+            valid_grade = False
+        for entry in self.grading_entries:
+            entry.configure(style="TEntry" if valid_grade else "Invalid.TEntry")
+        if not valid_grade:
+            invalid_fields.append("0 < GOOD < SOSO < 1")
+        if invalid_fields:
+            errors["values"] = t("판정 설정값 확인") + ": " + ", ".join(invalid_fields)
+        if hasattr(self, "input_error_var"):
+            self.input_error_var.set(errors.get("values", ""))
+            if "values" in errors:
+                self.input_error_label.grid()
+            else:
+                self.input_error_label.grid_remove()
+        if errors != self.required_errors and errors:
+            self.activity.emit("오류: {error}", "error", error=" · ".join(errors.values()))
+        self.required_errors = errors
+        if self.monitor_pending:
+            self.start_button.state(["disabled"])
+            self.status_var.set(t("처리 중"))
+        elif self.monitor_running:
+            self.start_button.state(["!disabled"])
+            self.status_var.set(t("입력값 확인 · 마지막 유효 설정 유지") if "values" in errors else t("설정 변경 실시간 적용"))
+        else:
+            self.start_button.state(["disabled"] if errors else ["!disabled"])
+            names = [t("OBS 화면") if key == "obs" else t("게임 창") if key == "game" else t("판정 설정") for key in errors]
+            self.status_var.set(t("필수 설정: {items}", items=" · ".join(names)) if errors else t("준비 완료 · 시작 시 설정 저장"))
+
+    def toggle_settings(self):
+        self.settings_visible = not self.settings_visible
+        if self.settings_visible:
+            self.left_scroller.grid()
+            self.body.columnconfigure(0, minsize=360)
+        else:
+            self.left_scroller.grid_remove()
+            self.body.columnconfigure(0, minsize=0)
+        self.settings_toggle.configure(text=("‹  " + t("설정 접기")) if self.settings_visible else ("›  " + t("설정 펼치기")))
+
+    def check_preview_source(self):
+        if self.monitor_running or self.monitor_pending or self.closing:
+            return
+        title = self.obs_window_var.get().strip()
+        hwnd = win32gui.FindWindow(None, title) if title else 0
+        if not hwnd:
+            self.refresh_windows(update_status=False)
+            title = self.obs_window_var.get().strip()
+            hwnd = win32gui.FindWindow(None, title) if title else 0
+        available = bool(hwnd and not win32gui.IsIconic(hwnd))
+        # Keep the single live panel active so source loss clears stale frames.
+        self.live_preview.active = True
+        self.last_source_available = available
+        self.update_connection_status()
+
+    def set_monitor_controls(self):
+        running = self.monitor_running or self.monitor_pending
+        for control in (self.obs_window_combo, self.game_window_combo, self.language_combo):
+            control.configure(state="disabled" if running else "readonly")
+        for control in self.mode_controls:
+            control.state(["disabled"] if running else ["!disabled"])
+        self.refresh_button.state(["disabled"] if running else ["!disabled"])
+        self.phase_var.set(t("모니터링 중") if self.monitor_running else t("미리보기"))
+        self.start_button.configure(text=t("모니터링 종료" if self.monitor_running else "모니터링 시작") + ("   ■" if self.monitor_running else "   →"))
+        self.live_preview.update_actions()
+        self.update_connection_status()
+
+    def monitor_event(self, action, payload):
+        if action in ("started", "stopped"):
+            self.monitor_pending = False
+            self.monitor_running = action == "started"
+            self.set_monitor_controls()
+            self.activity.emit("모니터링 시작" if action == "started" else "모니터링 종료")
+        elif action == "closed":
+            if self.closing:
+                self.destroy()
+        elif action == "error":
+            self.monitor_pending = False
+            self.closing = False
+            self.monitor_running = payload["running"]
+            self.set_monitor_controls()
+            self.activity.emit("오류: {error}", "error", error=payload["message"])
+            messagebox.showerror(t("작업 실패"), payload["message"])
+        elif action == "saved":
+            self.status_var.set(t("타이머 영역 저장"))
+            self.live_preview.calibration_saved_until = time.monotonic() + 2
+            self.activity.emit("타이머 영역 저장")
+
+    def close_app(self):
+        if self.closing:
+            return
+        self.closing = True
+        self.monitor_pending = True
+        self.update_connection_status()
+        try:
+            save_config(self.read_settings())
+        except (ValueError, OSError) as error:
+            self.activity.emit("오류: {error}", "error", error=str(error))
+        self.live_preview.worker.send("close")
+
+    def open_records(self):
+        os.startfile(record_folder())
+
+    def monitor_shortcut(self, event):
+        if isinstance(event.widget, (ttk.Entry, ttk.Combobox, tk.Text)):
+            return
+        key = event.keysym.lower()
+        if key == "escape" and self.monitor_running:
+            self.start_monitoring()
+        elif key == "d":
+            self.live_preview.invoke_action("reset")
+        elif key == "s":
+            self.live_preview.invoke_action("sample")
+        elif self.monitor_running and key in ("r", "m", "c"):
+            self.live_preview.invoke_action({"r": "record", "m": "mute", "c": "calibrate"}[key])
+        else:
+            return
+        return "break"
 
     def current_radius(self):
         try:
@@ -529,33 +744,37 @@ class App(ttkthemes.ThemedTk):
         self.radius_var.set(str(self.current_radius() + 1))
 
     def start_monitoring(self):
-        obs_window_title = self.obs_window_var.get().strip()
-        game_window_title = self.game_window_var.get().strip()
-        if not obs_window_title:
-            messagebox.showwarning("Azusa Detector", "Select an OBS window first.")
+        if self.monitor_pending:
             return
-        if not game_window_title:
-            messagebox.showwarning("Azusa Detector", "Select a game window first.")
+        if self.monitor_running:
+            try:
+                self.config_data = self.read_settings()
+                save_config(self.config_data)
+            except (ValueError, OSError) as error:
+                self.activity.emit("오류: {error}", "error", error=str(error))
+            self.monitor_pending = True
+            self.live_preview.worker.send("stop")
+            self.update_connection_status()
             return
+        self.update_connection_status()
+        if self.required_errors:
+            self.activity.emit("오류: {error}", "error", error=self.status_var.get())
+            messagebox.showwarning(t("입력값 확인"), self.status_var.get())
+            return
+        config = self.read_settings()
+        try:
+            save_config(config)
+        except OSError as error:
+            self.activity.emit("오류: {error}", "error", error=str(error))
+            messagebox.showerror(t("설정 저장 실패"), str(error))
+            return
+        self.config_data = config
+        self.monitor_target = (config["windows"]["obs_title"], config["windows"]["game_title"], config)
+        self.monitor_pending = True
+        self.live_preview.worker.update(config, True)
+        self.live_preview.worker.send("start", config)
+        self.set_monitor_controls()
 
-        updated_config = deepcopy(self.config_data)
-        updated_config.setdefault("windows", deepcopy(DEFAULT_CONFIG["windows"]))
-        updated_config["windows"]["obs_title"] = obs_window_title
-        updated_config["windows"]["game_title"] = game_window_title
-        updated_config["detect"]["circle_radius"] = self.radius_var.get()
-        updated_config["grading"]["good_max"] = self.good_var.get()
-        updated_config["grading"]["soso_max"] = self.soso_var.get()
-        updated_config["auto"]["enabled"] = self.auto_enabled_var.get()
-
-        validated_config, warnings = validate_config(updated_config)
-        if warnings:
-            messagebox.showwarning("Azusa Detector config", "\n".join(warnings))
-
-        save_config(validated_config)
-        self.status_var.set("Monitoring started...")
-        # 직접 실행하지 않고 요청만 남김 — 모니터링 종료 후 시작창으로 복귀하는 루프(__main__)가 처리
-        self.monitor_target = (obs_window_title, game_window_title, validated_config)
-        self.destroy()
 
 
 def detect_black_rectangle(frame):
@@ -575,68 +794,101 @@ def detect_black_rectangle(frame):
 def draw_circle(frame, rect, circle_radius):
     x, y, w, h = rect
     circle_center = (x + w // 2, y + h // 2)
-    cv2.circle(frame, circle_center, circle_radius, (0, 255, 255), 2)
+    cv2.circle(frame, circle_center, circle_radius, bgr("gold"), 2)
     return circle_center
 
 
-def check_white_point_outside_circle(frame, rect, circle_center, circle_radius):
+def detect_white_point(frame, rect):
+    """Find a white component's center throughout the play area, including inside the circle."""
     x, y, w, h = rect
     roi = frame[y : y + h, x : x + w]
-
-    mask = np.zeros(roi.shape[:2], dtype=np.uint8)
-    cv2.circle(mask, (circle_center[0] - x, circle_center[1] - y), circle_radius, 255, -1)
-
+    if roi.size == 0:
+        return None
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     white_pixels = cv2.inRange(hsv, WHITE_THRESHOLD_LOW, WHITE_THRESHOLD_HIGH)
-    outside_white_pixels = cv2.bitwise_and(white_pixels, cv2.bitwise_not(mask))
+    count, _, stats, centers = cv2.connectedComponentsWithStats(white_pixels)
+    # Ignore isolated pixels and large white panels. Ambiguous similarly-sized
+    # components are a missed detection, never an invented position.
+    max_area = max(3, w * h * 0.05)
+    candidates = [index for index in range(1, count) if 3 <= stats[index, cv2.CC_STAT_AREA] <= max_area]
+    candidates.sort(key=lambda index: stats[index, cv2.CC_STAT_AREA], reverse=True)
+    if not candidates:
+        return None
+    if len(candidates) > 1 and stats[candidates[0], cv2.CC_STAT_AREA] < 2 * stats[candidates[1], cv2.CC_STAT_AREA]:
+        return None
+    center = centers[candidates[0]]
+    return float(center[0] + x), float(center[1] + y)
 
-    white_points = cv2.findNonZero(outside_white_pixels)
-    if white_points is not None:
-        point = white_points[0][0]
-        return True, (point[0] + x, point[1] + y)
-    return False, None
+
+def judge_circle(point, rect, radius, enabled):
+    if not enabled or point is None:
+        return None
+    x, y, w, h = rect
+    return (point[0] - (x + w // 2)) ** 2 + (point[1] - (y + h // 2)) ** 2 > radius ** 2
+
+
+class PointTracker:
+    """Compare consecutive valid detections, retaining the reference across gaps."""
+
+    def __init__(self):
+        self.origin = None
+        self.last_point = None
+        self.last_seen_at = None
+        self.relative = None
+        self.delta = None
+        self.delta_seconds = None
+        self.detected = False
+
+    def update(self, point, now):
+        self.detected = point is not None
+        if point is None:
+            return
+        if self.origin is None:
+            self.origin = point
+        self.relative = tuple(value - origin for value, origin in zip(point, self.origin))
+        if self.last_point is not None:
+            self.delta = tuple(value - previous for value, previous in zip(point, self.last_point))
+            self.delta_seconds = now - self.last_seen_at
+        self.last_point = point
+        self.last_seen_at = now
 
 
 def play_alert_sound(is_muted):
     if is_muted:
-        return
+        return False
     if not os.path.exists(SOUND_FILE):
-        print(f"Sound file missing: {SOUND_FILE}")
-        return
-
-    unique_alias = f"alert_sound_{time.time_ns()}"
-    windll.winmm.mciSendStringW(f'open "{SOUND_FILE}" type waveaudio alias {unique_alias}', None, 0, None)
-    windll.winmm.mciSendStringW(f"play {unique_alias}", None, 0, None)
-    time.sleep(1)
-    windll.winmm.mciSendStringW(f"close {unique_alias}", None, 0, None)
+        raise OSError(t("알림음 파일 없음"))
+    # Windows plays asynchronously: no thread or one-second sleep per alert.
+    winsound.PlaySound(SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+    return True
 
 
 def capture_window(hwnd):
     left, top, right, bottom = win32gui.GetClientRect(hwnd)
-    width = right - left
-    height = bottom - top
-
+    width, height = right - left, bottom - top
+    if width <= 0 or height <= 0:
+        raise ValueError(t("캡처 영역 없음"))
     hwnd_dc = win32gui.GetWindowDC(hwnd)
-    mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
-    save_dc = mfc_dc.CreateCompatibleDC()
-
-    save_bitmap = win32ui.CreateBitmap()
-    save_bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
-    save_dc.SelectObject(save_bitmap)
-
-    windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3)
-
-    bmpinfo = save_bitmap.GetInfo()
-    bmpstr = save_bitmap.GetBitmapBits(True)
-    img = np.frombuffer(bmpstr, dtype="uint8")
-    img.shape = (bmpinfo["bmHeight"], bmpinfo["bmWidth"], 4)
-
-    win32gui.DeleteObject(save_bitmap.GetHandle())
-    save_dc.DeleteDC()
-    mfc_dc.DeleteDC()
-    win32gui.ReleaseDC(hwnd, hwnd_dc)
-
-    return img
+    mfc_dc = save_dc = save_bitmap = None
+    try:
+        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        save_bitmap = win32ui.CreateBitmap()
+        save_bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+        save_dc.SelectObject(save_bitmap)
+        if not windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3):
+            raise ValueError(t("창 캡처 실패"))
+        info = save_bitmap.GetInfo()
+        pixels = save_bitmap.GetBitmapBits(True)
+        return np.frombuffer(pixels, dtype="uint8").reshape((info["bmHeight"], info["bmWidth"], 4))
+    finally:
+        if save_dc is not None:
+            save_dc.DeleteDC()
+        if save_bitmap is not None:
+            win32gui.DeleteObject(save_bitmap.GetHandle())
+        if mfc_dc is not None:
+            mfc_dc.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwnd_dc)
 
 
 def seconds_from_digits(digits):
@@ -680,7 +932,7 @@ class TimerDetector:
                 path = os.path.join(directory, filename)
                 if not os.path.exists(path):
                     continue
-                template = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+                template = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
                 if template is None or template.size == 0:
                     continue
                 templates[str(digit)] = self.binarize_timer_image(template)
@@ -920,32 +1172,59 @@ class SessionRecorder:
         self.start_time = datetime.now()
         self.data = []
         self.total_frames = 0
+        self.detected_frames = 0
+        self.graded_frames = 0
         self.outside_frames = 0
         self.beep_count = 0
         self.max_outside_s = 0.0
         self.current_outside_started_at = None
+        self.last_outside_at = None
 
-    def add_frame(self, is_outside, white_point, rectangle, beep_event):
+    def close_outside_interval(self, at_time):
+        if self.current_outside_started_at is not None:
+            self.max_outside_s = max(self.max_outside_s, at_time - self.current_outside_started_at)
+            self.current_outside_started_at = None
+
+    def add_frame(self, is_outside, white_point, rectangle, beep_event, tracker, circle_enabled, delta_over=None):
         current_time = (datetime.now() - self.start_time).total_seconds()
         x, y, w, h = rectangle
 
         self.total_frames += 1
+        if white_point is not None:
+            self.detected_frames += 1
+        if is_outside is not None:
+            self.graded_frames += 1
         if is_outside:
             self.outside_frames += 1
 
         if beep_event:
             self.beep_count += 1
 
-        if is_outside and self.current_outside_started_at is None:
-            self.current_outside_started_at = current_time
-        elif not is_outside and self.current_outside_started_at is not None:
-            self.max_outside_s = max(self.max_outside_s, current_time - self.current_outside_started_at)
-            self.current_outside_started_at = None
+        if is_outside:
+            if self.current_outside_started_at is None:
+                self.current_outside_started_at = current_time
+            self.last_outside_at = current_time
+        elif self.current_outside_started_at is not None:
+            # Unknown/off frames must not extend an observed outside streak.
+            self.close_outside_interval(self.last_outside_at if is_outside is None else current_time)
 
-        if white_point:
-            self.data.append([current_time, is_outside, white_point[0], white_point[1], w, h])
+        if white_point is not None:
+            point = white_point
+            relative = tracker.relative
+            delta = tracker.delta or (None, None)
+            delta_seconds = tracker.delta_seconds
         else:
-            self.data.append([current_time, is_outside, None, None, w, h])
+            point = relative = delta = (None, None)
+            delta_seconds = None
+        self.data.append([
+            current_time, is_outside, *point, w, h,
+            white_point is not None, circle_enabled, *relative, *delta, delta_seconds,
+            math.hypot(*delta) if delta[0] is not None else None,
+            not circle_enabled and self.config["delta_feedback"]["enabled"],
+            self.config["delta_feedback"]["method"],
+            self.config["delta_feedback"]["x_px"], self.config["delta_feedback"]["y_px"],
+            self.config["delta_feedback"]["distance_px"], delta_over,
+        ])
 
     def finish(self):
         duration_s = (datetime.now() - self.start_time).total_seconds()
@@ -953,10 +1232,12 @@ class SessionRecorder:
             self.max_outside_s = max(self.max_outside_s, duration_s - self.current_outside_started_at)
             self.current_outside_started_at = None
 
-        outside_ratio = self.outside_frames / self.total_frames if self.total_frames else 0.0
+        outside_ratio = self.outside_frames / self.graded_frames if self.graded_frames else None
         good_max = self.config["grading"]["good_max"]
         soso_max = self.config["grading"]["soso_max"]
-        if outside_ratio <= good_max:
+        if outside_ratio is None:
+            grade = "N/A"
+        elif outside_ratio <= good_max:
             grade = "GOOD"
         elif outside_ratio <= soso_max:
             grade = "SOSO"
@@ -967,6 +1248,8 @@ class SessionRecorder:
             "timestamp": self.timestamp,
             "duration_s": duration_s,
             "total_frames": self.total_frames,
+            "detected_frames": self.detected_frames,
+            "graded_frames": self.graded_frames,
             "outside_frames": self.outside_frames,
             "outside_ratio": outside_ratio,
             "grade": grade,
@@ -987,7 +1270,7 @@ def record_folder():
 
 def save_record_data(data, rectangle):
     folder_name = record_folder()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     filename = os.path.join(folder_name, f"record_{timestamp}.csv")
 
     rect_w = rectangle[2] if rectangle else 0
@@ -995,19 +1278,27 @@ def save_record_data(data, rectangle):
     with open(filename, "w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(["Rectangle Size", f"{rect_w}x{rect_h}"])
-        writer.writerow(["Time (s)", "Is Outside", "X", "Y", "Rectangle Width", "Rectangle Height"])
+        writer.writerow([
+            "Time (s)", "Is Outside", "X", "Y", "Rectangle Width", "Rectangle Height",
+            "Detected", "Circle Enabled", "Relative X", "Relative Y", "Delta X", "Delta Y", "Delta Time (s)",
+            "Delta Distance (px)", "Delta Feedback Enabled", "Delta Threshold Mode",
+            "Delta Limit X (px)", "Delta Limit Y (px)", "Delta Limit Distance (px)", "Delta Over Threshold",
+        ])
         writer.writerows(data)
     print(f"Record saved to {filename}")
     return filename
 
 
 def append_session_summary(result):
-    filename = os.path.join(record_folder(), "sessions.csv")
+    # Keep the legacy summary schema intact; v2 includes a graded-frame denominator.
+    filename = os.path.join(record_folder(), "sessions_v2.csv")
     write_header = not os.path.exists(filename) or os.path.getsize(filename) == 0
     header = [
         "timestamp",
         "duration_s",
         "total_frames",
+        "detected_frames",
+        "graded_frames",
         "outside_frames",
         "outside_ratio",
         "grade",
@@ -1021,8 +1312,10 @@ def append_session_summary(result):
         result["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
         f"{result['duration_s']:.3f}",
         result["total_frames"],
+        result["detected_frames"],
+        result["graded_frames"],
         result["outside_frames"],
-        f"{result['outside_ratio']:.6f}",
+        f"{result['outside_ratio']:.6f}" if result["outside_ratio"] is not None else "",
         result["grade"],
         result["good_max"],
         result["soso_max"],
@@ -1054,7 +1347,9 @@ def save_timer_calibration(frame, rectangle, timer_detector):
     folder = os.path.join(EXTERNAL_DIGIT_DIR, "calibration")
     os.makedirs(folder, exist_ok=True)
     filename = os.path.join(folder, f"timer_roi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-    if cv2.imwrite(filename, roi):
+    encoded, png = cv2.imencode(".png", roi)
+    if encoded:
+        png.tofile(filename)
         return filename
     return None
 
@@ -1074,10 +1369,17 @@ def draw_alpha_rect(frame, x1, y1, x2, y2, color, alpha=0.72):
 
 
 def draw_text(frame, text, x, y, scale=0.55, color=(235, 240, 245), thickness=1):
+    text = overlay_text(text)
+    if not text.isascii():
+        unicode_text.draw(frame, text, x, y, scale, color)
+        return
     cv2.putText(frame, text, (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
 def text_width(text, scale=0.55, thickness=1):
+    text = overlay_text(text)
+    if not text.isascii():
+        return unicode_text.width(text, scale)
     size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
     return size[0]
 
@@ -1112,21 +1414,23 @@ def draw_keycap(frame, x, y, key, width, height, accent_color):
     draw_text(frame, key, text_x, text_y, text_scale, (248, 250, 252), 1)
 
 
-def draw_shortcut_guide(frame, margin):
+def draw_shortcut_guide(frame, margin, circle_enabled=True, delta_enabled=False):
     height, width = frame.shape[:2]
     controls = [
         ("Q/ESC", "Back to setup"),
         ("R", "Record on/off"),
-        ("M", "Mute"),
-        ("+/-", "Radius"),
-        ("C", "Save game timer ROI"),
     ]
+    if circle_enabled or delta_enabled:
+        controls.append(("M", "Mute"))
+    if circle_enabled:
+        controls.append(("+/-", "Radius"))
+    controls.append(("C", "Save game timer ROI"))
 
-    bg = (18, 22, 28)
-    border = (68, 80, 96)
-    accent = (255, 199, 82)
-    muted = (156, 168, 184)
-    text = (232, 238, 244)
+    bg = bgr("deep")
+    border = bgr("purple")
+    accent = bgr("gold")
+    muted = bgr("muted")
+    text = bgr("silver")
     max_w = width - margin * 2
     key_scale = 0.44
     label_scale = 0.45
@@ -1183,9 +1487,12 @@ def draw_result_card(frame, result):
         return
 
     grade = result["grade"]
-    ratio_text = f"{result['outside_ratio'] * 100:.1f}%"
+    ratio_text = f"{result['outside_ratio'] * 100:.1f}%" if result["outside_ratio"] is not None else "--"
     title = f"{grade}"
-    detail = f"outside {ratio_text}  |  {result['outside_frames']}/{result['total_frames']} frames"
+    detail = (
+        f"outside {ratio_text}  |  {result['outside_frames']}/{result['graded_frames']} judged frames"
+        if result["graded_frames"] else "No judged frames (circle off or no detection)"
+    )
     extra = f"beeps {result['beep_count']}  |  max outside {result['max_outside_s']:.2f}s"
 
     grade_colors = {
@@ -1197,10 +1504,10 @@ def draw_result_card(frame, result):
 
     height, width = frame.shape[:2]
     margin = max(14, int(min(width, height) * 0.018))
-    card_w = min(max(360, width // 2), width - margin * 2)
+    card_w = min(max(440, width // 2 - 20), width - margin * 2)
     card_h = 132
-    x1 = max(margin, (width - card_w) // 2)
-    y1 = margin
+    x1 = width - margin - card_w
+    y1 = margin if x1 >= 480 else margin + 285
     x2 = x1 + card_w
     y2 = y1 + card_h
 
@@ -1208,33 +1515,36 @@ def draw_result_card(frame, result):
     cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 82, 98), 1)
     cv2.rectangle(frame, (x1, y1), (x1 + 6, y2), accent, -1)
     draw_text(frame, title, x1 + 24, y1 + 45, 1.1, accent, 2)
-    draw_text(frame, detail, x1 + 24, y1 + 78, 0.62, (238, 242, 246), 1)
+    draw_text(frame, detail, x1 + 24, y1 + 78, fit_text_scale(detail, card_w - 48, 0.62), (238, 242, 246), 1)
     draw_text(frame, extra, x1 + 24, y1 + 108, 0.52, (170, 180, 192), 1)
 
 
-def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds, timer_method, status_message, last_result=None):
+def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds, timer_method,
+             status_message, last_result=None, circle_enabled=True, tracker=None, delta_feedback=None):
     height, width = frame.shape[:2]
     margin = max(12, int(min(width, height) * 0.014))
-    panel_w = min(max(330, int(width * 0.28)), width - margin * 2)
-    panel_h = 132 if not status_message else 158
+    panel_w = min(460, width - margin * 2)
+    panel_h = 258 if not status_message else 284
     x1 = margin
     y1 = margin
     x2 = x1 + panel_w
     y2 = y1 + panel_h
 
-    bg = (18, 22, 28)
-    border = (68, 80, 96)
-    text = (235, 240, 245)
-    muted = (156, 168, 184)
-    accent = (255, 199, 82)
-    red = (72, 94, 232)
-    green = (92, 210, 126)
-    blue = (255, 176, 74)
-    gray = (86, 94, 106)
+    bg = bgr("deep")
+    border = bgr("purple")
+    text = bgr("silver")
+    muted = bgr("muted")
+    accent = bgr("gold")
+    red = bgr("pink")
+    green = bgr("safe")
+    blue = bgr("lilac")
+    gray = bgr("border")
 
     draw_alpha_rect(frame, x1, y1, x2, y2, bg, 0.78)
     cv2.rectangle(frame, (x1, y1), (x2, y2), border, 1)
     draw_text(frame, "AZUSA DETECTOR", x1 + 14, y1 + 24, 0.48, muted, 1)
+    mode_label = "MODE: CIRCLE JUDGING" if circle_enabled else "MODE: POSITION ONLY"
+    draw_text(frame, mode_label, x1 + 14, y1 + 55, 0.55, green if circle_enabled else accent)
 
     if session is not None:
         elapsed_time = (datetime.now() - session.start_time).total_seconds()
@@ -1260,29 +1570,56 @@ def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds,
     elif "REC" in auto_text:
         auto_color = red
 
-    badge_y = y1 + 39
+    badge_y = y1 + 76
     next_x = draw_badge(frame, x1 + 14, badge_y, rec_text, rec_color)
     if next_x + 118 < x2:
         next_x = draw_badge(frame, next_x + 8, badge_y, auto_text, auto_color)
     if next_x + 94 < x2:
         draw_badge(frame, next_x + 8, badge_y, timer_text, (52, 62, 74))
 
-    row_y = y1 + 92
-    draw_text(frame, f"Radius {circle_radius}", x1 + 14, row_y, 0.52, text, 1)
-    mute_label = "Muted ON" if is_muted else "Muted OFF"
-    mute_color = (80, 96, 230) if is_muted else muted
-    draw_text(frame, mute_label, x1 + 130, row_y, 0.52, mute_color, 1)
+    row_y = y1 + 126
+    if circle_enabled:
+        draw_text(frame, f"Radius {circle_radius}", x1 + 14, row_y, 0.52, text, 1)
+        mute_label = "Muted ON" if is_muted else "Muted OFF"
+        mute_color = (80, 96, 230) if is_muted else muted
+        draw_text(frame, mute_label, x1 + 130, row_y, 0.52, mute_color, 1)
+    else:
+        delta_label = threshold_label(delta_feedback.config) if delta_feedback else "Delta feedback OFF"
+        if is_muted:
+            delta_label += " [MUTED]"
+        draw_text(frame, delta_label, x1 + 14, row_y, fit_text_scale(delta_label, panel_w - 28, 0.46), muted)
+    if tracker is not None:
+        tracking_label = "TRACKING" if tracker.detected else "NO DETECTION - holding last values"
+        delta_alert = delta_feedback is not None and delta_feedback.visible(time.monotonic())
+        if delta_alert and tracker.detected:
+            dx, dy = delta_feedback.last_alert_delta
+            tracking_label = f"DELTA ALERT: X {dx:+.1f} Y {dy:+.1f} px"
+        draw_text(frame, tracking_label, x1 + 14, y1 + 151, fit_text_scale(tracking_label, panel_w - 28, 0.46),
+                  (80, 100, 255) if delta_alert else (green if tracker.detected else accent))
+        position_text = "Position: -- (waiting for first detection)"
+        if tracker.relative is not None:
+            position_text = f"Position: X {tracker.relative[0]:+.1f}  Y {tracker.relative[1]:+.1f} px"
+        draw_text(frame, position_text, x1 + 14, y1 + 176, fit_text_scale(position_text, panel_w - 28), text)
+        delta_text = "Delta: -- (waiting for next detection)"
+        if tracker.delta is not None:
+            delta_text = f"Delta: X {tracker.delta[0]:+.1f}  Y {tracker.delta[1]:+.1f} px"
+        draw_text(frame, delta_text, x1 + 14, y1 + 201, fit_text_scale(delta_text, panel_w - 28), text)
+        gap_text = "Axes: right +X, down +Y"
+        if tracker.delta_seconds is not None:
+            gap_text += f"  |  dt {tracker.delta_seconds:.3f}s"
+        draw_text(frame, gap_text, x1 + 14, y1 + 222, 0.40, muted)
     if last_result is not None:
         # 결과 카드(3초)가 사라진 뒤에도 마지막 세션 결과를 항상 확인 가능
         grade_colors = {"GOOD": (92, 220, 126), "SOSO": (64, 202, 255), "BAD": (86, 118, 255)}
-        last_text = f"Last {last_result['grade']} {last_result['outside_ratio'] * 100:.1f}%"
-        draw_text(frame, last_text, x1 + 246, row_y, 0.52, grade_colors.get(last_result["grade"], muted), 1)
+        ratio = last_result["outside_ratio"]
+        last_text = f"Last {last_result['grade']}" + (f" {ratio * 100:.1f}%" if ratio is not None else " (no judged frames)")
+        draw_text(frame, last_text, x1 + 14, y1 + 244, 0.44, grade_colors.get(last_result["grade"], muted), 1)
 
     if status_message:
         status_scale = fit_text_scale(status_message, panel_w - 28, 0.48, 0.36)
-        draw_text(frame, status_message, x1 + 14, y1 + 125, status_scale, accent, 1)
+        draw_text(frame, status_message, x1 + 14, y1 + 271, status_scale, accent, 1)
 
-    draw_shortcut_guide(frame, margin)
+    draw_shortcut_guide(frame, margin, circle_enabled, bool(delta_feedback and delta_feedback.config["enabled"]))
 
 
 def set_status(message):
@@ -1315,176 +1652,23 @@ def full_frame_rect(frame):
 
 
 def main(obs_window_title, game_window_title, config):
-    obs_hwnd = find_window_handle(obs_window_title, "OBS")
-    if not obs_hwnd:
-        return
-
-    game_hwnd = find_window_handle(game_window_title, "Game")
-    if not game_hwnd:
-        return
-
-    initial_rectangle = None
-    session = None
-    is_muted = False
-    was_outside = False
-    circle_radius = config["detect"]["circle_radius"]
-
-    timer_detector = TimerDetector(config)
-    auto_state = AutoStateMachine(config)
-    last_result = None
-    result_overlay_until = 0.0
-    status_message = ""
-    status_message_until = 0.0
-    display_window_initialized = False
-
-    while True:
-        now = time.time()
-        obs_screenshot = capture_window(obs_hwnd)
-        raw_frame = cv2.cvtColor(obs_screenshot, cv2.COLOR_RGBA2BGR)
-        if game_hwnd == obs_hwnd:
-            timer_raw_frame = raw_frame
-        else:
-            game_screenshot = capture_window(game_hwnd)
-            timer_raw_frame = cv2.cvtColor(game_screenshot, cv2.COLOR_RGBA2BGR)
-        timer_frame_rect = full_frame_rect(timer_raw_frame)
-        frame = raw_frame.copy()
-        timer_seconds = None
-        timer_method = None
-
-        timer_seconds, timer_roi_rect, timer_method = timer_detector.read_seconds(
-            timer_raw_frame,
-            timer_frame_rect,
-            now,
-        )
-        if timer_method:
-            timer_method = f"{timer_method}/game"
-
-        if initial_rectangle is None:
-            initial_rectangle, frame = detect_black_rectangle(frame)
-            if initial_rectangle is None:
-                # 인식 전 무화면 방치 방지 — 뭘 기다리는지 표시 (매 프레임 갱신이라 인식되면 자연 소멸)
-                status_message, status_message_until = set_status("Looking for play area (black box)...")
-        elif initial_rectangle:
-            x, y, w, h = initial_rectangle
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (88, 178, 118), 1)
-
-        if initial_rectangle:
-            if timer_roi_rect and game_hwnd == obs_hwnd:
-                rx, ry, rw, rh = timer_roi_rect
-                cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), (255, 178, 74), 1)
-
-            if auto_state.maybe_start(timer_seconds, now, session is not None):
-                session = SessionRecorder(config, "auto")
-                status_message, status_message_until = set_status("Auto recording started")
-
-            circle_center = draw_circle(frame, initial_rectangle, circle_radius)
-            is_outside, white_point = check_white_point_outside_circle(
-                raw_frame, initial_rectangle, circle_center, circle_radius
-            )
-
-            beep_event = is_outside and not was_outside
-            if beep_event:
-                threading.Thread(target=play_alert_sound, args=(is_muted,)).start()
-                print("Outside detected")
-            was_outside = is_outside
-
-            if session is not None:
-                session.add_frame(is_outside, white_point, initial_rectangle, beep_event)
-
-            finish_reason = auto_state.maybe_finish(
-                timer_seconds,
-                now,
-                session is not None,
-                session.source if session is not None else None,
-            )
-            if finish_reason and session is not None:
-                last_result = finish_recording(session, initial_rectangle)
-                result_overlay_until = time.time() + RESULT_OVERLAY_SEC
-                status_message, status_message_until = set_status(f"Auto recording stopped: {finish_reason}")
-                session = None
-                auto_state.record_stopped(last_result, time.time())
-
-        if now >= status_message_until:
-            status_message = ""
-
-        draw_hud(
-            frame,
-            circle_radius,
-            session,
-            is_muted,
-            auto_state.label(session),
-            timer_seconds,
-            timer_method,
-            status_message,
-            last_result,
-        )
-
-        if time.time() < result_overlay_until:
-            draw_result_card(frame, last_result)
-
-        if not display_window_initialized:
-            initialize_display_window(frame)
-            display_window_initialized = True
-
-        cv2.imshow(DISPLAY_WINDOW_NAME, frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        # 창 X버튼으로 닫아도 Q와 동일하게 안전 종료 (녹화 중이면 저장)
-        window_closed = cv2.getWindowProperty(DISPLAY_WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1
-        if key in (ord("q"), 27) or window_closed:  # Q / ESC / 창닫기
-            if session is not None:
-                last_result = finish_recording(session, initial_rectangle)
-                auto_state.record_stopped(last_result, time.time())
-                session = None
-            break
-        if key in (ord("+"), ord("=")):
-            circle_radius += 1
-            config["detect"]["circle_radius"] = circle_radius
-            save_config(config)
-            status_message, status_message_until = set_status(f"Circle radius: {circle_radius}")
-        elif key in (ord("-"), ord("_")):
-            circle_radius = max(1, circle_radius - 1)
-            config["detect"]["circle_radius"] = circle_radius
-            save_config(config)
-            status_message, status_message_until = set_status(f"Circle radius: {circle_radius}")
-        elif key == ord("r"):
-            if session is None:
-                session = SessionRecorder(config, "manual")
-                status_message, status_message_until = set_status("Manual recording started")
-            else:
-                last_result = finish_recording(session, initial_rectangle)
-                result_overlay_until = time.time() + RESULT_OVERLAY_SEC
-                if session.source == "auto":
-                    auto_state.record_stopped(last_result, time.time())
-                session = None
-                status_message, status_message_until = set_status("Recording stopped")
-        elif key == ord("m"):
-            is_muted = not is_muted
-            status_message, status_message_until = set_status(f"Mute {'enabled' if is_muted else 'disabled'}")
-            print(f"Mute {'enabled' if is_muted else 'disabled'}")
-        elif key == ord("c"):
-            if timer_frame_rect:
-                saved_path = save_timer_calibration(timer_raw_frame, timer_frame_rect, timer_detector)
-                if saved_path:
-                    status_message, status_message_until = set_status(f"Saved timer ROI: {os.path.basename(saved_path)}")
-                    print(f"Saved timer ROI to {saved_path}")
-                else:
-                    status_message, status_message_until = set_status("Failed to save timer ROI")
-            else:
-                status_message, status_message_until = set_status("No game frame yet")
-
-    cv2.destroyAllWindows()
+    """Compatibility entry point: monitoring is hosted by the main Tk window."""
+    config = deepcopy(config)
+    config["windows"] = {"obs_title": obs_window_title, "game_title": game_window_title}
+    app = App(config, [])
+    app.after_idle(app.start_monitoring)
+    app.mainloop()
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        from self_check import run_self_check
+
+        raise SystemExit(run_self_check(sys.modules[__name__]))
     if getattr(sys, "frozen", False):
         hide_console()
-    # 모니터링 종료(Q/ESC/창닫기) 시 시작창으로 복귀 — 설정 바꾸려고 재실행할 필요 없음
-    while True:
-        loaded_config, loaded_warnings = load_config()
-        app = App(loaded_config, loaded_warnings)
-        app.mainloop()
-        target = getattr(app, "monitor_target", None)
-        if not target:
-            break
-        main(*target)
+    loaded_config, loaded_warnings = load_config()
+    app = App(loaded_config, loaded_warnings)
+    if "--sample" in sys.argv:
+        app.after(200, lambda: app.live_preview.invoke_action("sample"))
+    app.mainloop()

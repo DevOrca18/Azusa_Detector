@@ -1,0 +1,6 @@
+opencv-python==5.0.0.93
+numpy==2.5.3
+PyGetWindow==0.0.9
+ttkthemes==3.3.0
+pywin32==312
+Pillow==12.3.0

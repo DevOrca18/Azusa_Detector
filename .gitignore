@@ -2,3 +2,8 @@ __pycache__/
 *.py[cod]
 config.json
 azusa_record/
+.venv/
+build/
+release/
+self-test.json
+assets/digits/calibration/
