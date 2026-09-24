@@ -1,4 +1,43 @@
 # Azusa Detector (ᓀ‸ᓂ)
+## Coordinate tracking and optional circle judging
+
+Windows / Python 3.12:
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+```
+
+- Use **Circle judging** in setup, the **Circle ON/OFF** button in the monitoring
+  window, or **O** while that window is focused. The choice is saved in `config.json`.
+- **ON** shows the circle and enables outside alerts and grading. **OFF** hides
+  the circle and disables alerts/grading; position tracking and recording continue.
+- **Position** is relative to the first valid detection. **Delta** compares the
+  current valid detection with the previous valid detection. The first detection
+  has position `(0, 0)` and no delta. Toggling the circle or recording does not reset
+  these references; starting a new monitoring run does.
+- Missing detections retain the last displayed values with a **NO DETECTION** label.
+  For `A -> missing -> missing -> B`, the next delta is `B - A`. Missing CSV rows
+  have blank coordinates/deltas, never invented zeroes. `Delta Time (s)` includes
+  the gap between the two valid detections.
+- Coordinates use original OBS capture pixels: right is +X, down is +Y. They are
+  not game-world distances or pixels in the resized Display window.
+- The detector uses the center of a white connected component anywhere in the
+  black play area. It ignores components below 3 pixels, components larger than
+  5% of the area, and ambiguous candidates when the largest is less than twice the
+  size of the runner-up. These are simple noise filters, not a guarantee against
+  all false detections; the existing white-dot-on-black OBS setup is still needed.
+- **R** starts/stops CSV recording. Per-frame CSVs retain the original six columns
+  and append detection status, circle mode, relative position, delta, and delta time.
+  `sessions_v2.csv` stores total/detected/judged frame counts. Only valid detections
+  with circle judging ON enter the grade denominator. No judged frames means **N/A**.
+  Existing `sessions.csv` files are left intact.
+
+Tests:
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
 Q : quit<br>
 R : record<br>
 M : mute

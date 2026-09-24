@@ -35,7 +35,7 @@ DEFAULT_CONFIG = {
         "ocr_fallback": False,
     },
     "timer_roi": {"x_ratio": 0.42, "y_ratio": -0.98, "w_ratio": 0.13, "h_ratio": 0.08},
-    "detect": {"circle_radius": 45},
+    "detect": {"circle_radius": 45, "circle_enabled": True},
 }
 
 DIGIT_CANDIDATE_SCORE_MIN = 0.25
@@ -242,7 +242,13 @@ def validate_config(config):
             warnings,
             "detect.circle_radius",
             minimum=1,
-        )
+        ),
+        "circle_enabled": coerce_bool(
+            detect_config.get("circle_enabled"),
+            detect_default["circle_enabled"],
+            warnings,
+            "detect.circle_enabled",
+        ),
     }
 
     merged["timer_roi"] = validate_timer_roi(merged.get("timer_roi"), warnings)
@@ -287,8 +293,8 @@ class App(ttkthemes.ThemedTk):
         self.config_warnings = config_warnings
 
         self.title("Azusa Detector")
-        self.geometry("520x520")
-        self.minsize(500, 500)
+        self.geometry("560x640")
+        self.minsize(560, 640)
         self.resizable(True, True)
 
         self.configure(background="#20242b")
@@ -298,6 +304,7 @@ class App(ttkthemes.ThemedTk):
         self.obs_window_var = tk.StringVar(value=config["windows"].get("obs_title", ""))
         self.game_window_var = tk.StringVar(value=config["windows"].get("game_title", ""))
         self.radius_var = tk.StringVar(value=str(config["detect"]["circle_radius"]))
+        self.circle_enabled_var = tk.BooleanVar(value=config["detect"]["circle_enabled"])
         self.good_var = tk.StringVar(value=str(config["grading"]["good_max"]))
         self.soso_var = tk.StringVar(value=str(config["grading"]["soso_max"]))
         self.auto_enabled_var = tk.BooleanVar(value=config["auto"]["enabled"])
@@ -346,6 +353,14 @@ class App(ttkthemes.ThemedTk):
         ttk.Button(detect_section, text="+", command=self.increase_radius, width=3).grid(
             row=0, column=3, padx=(0, 12), pady=12
         )
+        ttk.Checkbutton(
+            detect_section, text="Circle judging (O to toggle while monitoring)",
+            variable=self.circle_enabled_var,
+        ).grid(row=1, column=0, columnspan=4, sticky=tk.W, padx=12, pady=(0, 6))
+        ttk.Label(
+            detect_section, text="Position and movement tracking stay on when circle judging is off.",
+            style="Hint.TLabel",
+        ).grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=12, pady=(0, 12))
 
         grading_section = ttk.LabelFrame(main_frame, text="Grading", style="Section.TLabelframe")
         grading_section.grid(row=3, column=0, sticky=tk.EW, pady=(12, 0))
@@ -467,7 +482,7 @@ class App(ttkthemes.ThemedTk):
         self.style.configure(
             "Primary.TButton",
             background=accent,
-            foreground="#10151b",
+            foreground=text,
             bordercolor=accent,
             font=("Segoe UI", 11, "bold"),
             padding=(12, 7),
@@ -475,7 +490,7 @@ class App(ttkthemes.ThemedTk):
         self.style.map(
             "Primary.TButton",
             background=[("active", accent_active), ("pressed", "#40b7ee")],
-            foreground=[("active", "#10151b"), ("pressed", "#10151b")],
+            foreground=[("active", text), ("pressed", text)],
         )
 
     def show_config_warnings(self):
@@ -543,6 +558,7 @@ class App(ttkthemes.ThemedTk):
         updated_config["windows"]["obs_title"] = obs_window_title
         updated_config["windows"]["game_title"] = game_window_title
         updated_config["detect"]["circle_radius"] = self.radius_var.get()
+        updated_config["detect"]["circle_enabled"] = self.circle_enabled_var.get()
         updated_config["grading"]["good_max"] = self.good_var.get()
         updated_config["grading"]["soso_max"] = self.soso_var.get()
         updated_config["auto"]["enabled"] = self.auto_enabled_var.get()
@@ -579,22 +595,59 @@ def draw_circle(frame, rect, circle_radius):
     return circle_center
 
 
-def check_white_point_outside_circle(frame, rect, circle_center, circle_radius):
+def detect_white_point(frame, rect):
+    """Find a white component's center throughout the play area, including inside the circle."""
     x, y, w, h = rect
     roi = frame[y : y + h, x : x + w]
-
-    mask = np.zeros(roi.shape[:2], dtype=np.uint8)
-    cv2.circle(mask, (circle_center[0] - x, circle_center[1] - y), circle_radius, 255, -1)
-
+    if roi.size == 0:
+        return None
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     white_pixels = cv2.inRange(hsv, WHITE_THRESHOLD_LOW, WHITE_THRESHOLD_HIGH)
-    outside_white_pixels = cv2.bitwise_and(white_pixels, cv2.bitwise_not(mask))
+    count, _, stats, centers = cv2.connectedComponentsWithStats(white_pixels)
+    # Ignore isolated pixels and large white panels. Ambiguous similarly-sized
+    # components are a missed detection, never an invented position.
+    max_area = max(3, w * h * 0.05)
+    candidates = [index for index in range(1, count) if 3 <= stats[index, cv2.CC_STAT_AREA] <= max_area]
+    candidates.sort(key=lambda index: stats[index, cv2.CC_STAT_AREA], reverse=True)
+    if not candidates:
+        return None
+    if len(candidates) > 1 and stats[candidates[0], cv2.CC_STAT_AREA] < 2 * stats[candidates[1], cv2.CC_STAT_AREA]:
+        return None
+    center = centers[candidates[0]]
+    return float(center[0] + x), float(center[1] + y)
 
-    white_points = cv2.findNonZero(outside_white_pixels)
-    if white_points is not None:
-        point = white_points[0][0]
-        return True, (point[0] + x, point[1] + y)
-    return False, None
+
+def judge_circle(point, rect, radius, enabled):
+    if not enabled or point is None:
+        return None
+    x, y, w, h = rect
+    return (point[0] - (x + w // 2)) ** 2 + (point[1] - (y + h // 2)) ** 2 > radius ** 2
+
+
+class PointTracker:
+    """Compare consecutive valid detections, retaining the reference across gaps."""
+
+    def __init__(self):
+        self.origin = None
+        self.last_point = None
+        self.last_seen_at = None
+        self.relative = None
+        self.delta = None
+        self.delta_seconds = None
+        self.detected = False
+
+    def update(self, point, now):
+        self.detected = point is not None
+        if point is None:
+            return
+        if self.origin is None:
+            self.origin = point
+        self.relative = tuple(value - origin for value, origin in zip(point, self.origin))
+        if self.last_point is not None:
+            self.delta = tuple(value - previous for value, previous in zip(point, self.last_point))
+            self.delta_seconds = now - self.last_seen_at
+        self.last_point = point
+        self.last_seen_at = now
 
 
 def play_alert_sound(is_muted):
@@ -920,32 +973,54 @@ class SessionRecorder:
         self.start_time = datetime.now()
         self.data = []
         self.total_frames = 0
+        self.detected_frames = 0
+        self.graded_frames = 0
         self.outside_frames = 0
         self.beep_count = 0
         self.max_outside_s = 0.0
         self.current_outside_started_at = None
+        self.last_outside_at = None
 
-    def add_frame(self, is_outside, white_point, rectangle, beep_event):
+    def close_outside_interval(self, at_time):
+        if self.current_outside_started_at is not None:
+            self.max_outside_s = max(self.max_outside_s, at_time - self.current_outside_started_at)
+            self.current_outside_started_at = None
+
+    def add_frame(self, is_outside, white_point, rectangle, beep_event, tracker, circle_enabled):
         current_time = (datetime.now() - self.start_time).total_seconds()
         x, y, w, h = rectangle
 
         self.total_frames += 1
+        if white_point is not None:
+            self.detected_frames += 1
+        if is_outside is not None:
+            self.graded_frames += 1
         if is_outside:
             self.outside_frames += 1
 
         if beep_event:
             self.beep_count += 1
 
-        if is_outside and self.current_outside_started_at is None:
-            self.current_outside_started_at = current_time
-        elif not is_outside and self.current_outside_started_at is not None:
-            self.max_outside_s = max(self.max_outside_s, current_time - self.current_outside_started_at)
-            self.current_outside_started_at = None
+        if is_outside:
+            if self.current_outside_started_at is None:
+                self.current_outside_started_at = current_time
+            self.last_outside_at = current_time
+        elif self.current_outside_started_at is not None:
+            # Unknown/off frames must not extend an observed outside streak.
+            self.close_outside_interval(self.last_outside_at if is_outside is None else current_time)
 
-        if white_point:
-            self.data.append([current_time, is_outside, white_point[0], white_point[1], w, h])
+        if white_point is not None:
+            point = white_point
+            relative = tracker.relative
+            delta = tracker.delta or (None, None)
+            delta_seconds = tracker.delta_seconds
         else:
-            self.data.append([current_time, is_outside, None, None, w, h])
+            point = relative = delta = (None, None)
+            delta_seconds = None
+        self.data.append([
+            current_time, is_outside, *point, w, h,
+            white_point is not None, circle_enabled, *relative, *delta, delta_seconds,
+        ])
 
     def finish(self):
         duration_s = (datetime.now() - self.start_time).total_seconds()
@@ -953,10 +1028,12 @@ class SessionRecorder:
             self.max_outside_s = max(self.max_outside_s, duration_s - self.current_outside_started_at)
             self.current_outside_started_at = None
 
-        outside_ratio = self.outside_frames / self.total_frames if self.total_frames else 0.0
+        outside_ratio = self.outside_frames / self.graded_frames if self.graded_frames else None
         good_max = self.config["grading"]["good_max"]
         soso_max = self.config["grading"]["soso_max"]
-        if outside_ratio <= good_max:
+        if outside_ratio is None:
+            grade = "N/A"
+        elif outside_ratio <= good_max:
             grade = "GOOD"
         elif outside_ratio <= soso_max:
             grade = "SOSO"
@@ -967,6 +1044,8 @@ class SessionRecorder:
             "timestamp": self.timestamp,
             "duration_s": duration_s,
             "total_frames": self.total_frames,
+            "detected_frames": self.detected_frames,
+            "graded_frames": self.graded_frames,
             "outside_frames": self.outside_frames,
             "outside_ratio": outside_ratio,
             "grade": grade,
@@ -995,19 +1074,25 @@ def save_record_data(data, rectangle):
     with open(filename, "w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(["Rectangle Size", f"{rect_w}x{rect_h}"])
-        writer.writerow(["Time (s)", "Is Outside", "X", "Y", "Rectangle Width", "Rectangle Height"])
+        writer.writerow([
+            "Time (s)", "Is Outside", "X", "Y", "Rectangle Width", "Rectangle Height",
+            "Detected", "Circle Enabled", "Relative X", "Relative Y", "Delta X", "Delta Y", "Delta Time (s)",
+        ])
         writer.writerows(data)
     print(f"Record saved to {filename}")
     return filename
 
 
 def append_session_summary(result):
-    filename = os.path.join(record_folder(), "sessions.csv")
+    # Keep the legacy summary schema intact; v2 includes a graded-frame denominator.
+    filename = os.path.join(record_folder(), "sessions_v2.csv")
     write_header = not os.path.exists(filename) or os.path.getsize(filename) == 0
     header = [
         "timestamp",
         "duration_s",
         "total_frames",
+        "detected_frames",
+        "graded_frames",
         "outside_frames",
         "outside_ratio",
         "grade",
@@ -1021,8 +1106,10 @@ def append_session_summary(result):
         result["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
         f"{result['duration_s']:.3f}",
         result["total_frames"],
+        result["detected_frames"],
+        result["graded_frames"],
         result["outside_frames"],
-        f"{result['outside_ratio']:.6f}",
+        f"{result['outside_ratio']:.6f}" if result["outside_ratio"] is not None else "",
         result["grade"],
         result["good_max"],
         result["soso_max"],
@@ -1117,6 +1204,7 @@ def draw_shortcut_guide(frame, margin):
     controls = [
         ("Q/ESC", "Back to setup"),
         ("R", "Record on/off"),
+        ("O", "Circle on/off"),
         ("M", "Mute"),
         ("+/-", "Radius"),
         ("C", "Save game timer ROI"),
@@ -1183,9 +1271,12 @@ def draw_result_card(frame, result):
         return
 
     grade = result["grade"]
-    ratio_text = f"{result['outside_ratio'] * 100:.1f}%"
+    ratio_text = f"{result['outside_ratio'] * 100:.1f}%" if result["outside_ratio"] is not None else "--"
     title = f"{grade}"
-    detail = f"outside {ratio_text}  |  {result['outside_frames']}/{result['total_frames']} frames"
+    detail = (
+        f"outside {ratio_text}  |  {result['outside_frames']}/{result['graded_frames']} judged frames"
+        if result["graded_frames"] else "No judged frames (circle off or no detection)"
+    )
     extra = f"beeps {result['beep_count']}  |  max outside {result['max_outside_s']:.2f}s"
 
     grade_colors = {
@@ -1197,10 +1288,10 @@ def draw_result_card(frame, result):
 
     height, width = frame.shape[:2]
     margin = max(14, int(min(width, height) * 0.018))
-    card_w = min(max(360, width // 2), width - margin * 2)
+    card_w = min(max(440, width // 2 - 20), width - margin * 2)
     card_h = 132
-    x1 = max(margin, (width - card_w) // 2)
-    y1 = margin
+    x1 = width - margin - card_w
+    y1 = margin if x1 >= 480 else margin + 285
     x2 = x1 + card_w
     y2 = y1 + card_h
 
@@ -1208,15 +1299,16 @@ def draw_result_card(frame, result):
     cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 82, 98), 1)
     cv2.rectangle(frame, (x1, y1), (x1 + 6, y2), accent, -1)
     draw_text(frame, title, x1 + 24, y1 + 45, 1.1, accent, 2)
-    draw_text(frame, detail, x1 + 24, y1 + 78, 0.62, (238, 242, 246), 1)
+    draw_text(frame, detail, x1 + 24, y1 + 78, fit_text_scale(detail, card_w - 48, 0.62), (238, 242, 246), 1)
     draw_text(frame, extra, x1 + 24, y1 + 108, 0.52, (170, 180, 192), 1)
 
 
-def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds, timer_method, status_message, last_result=None):
+def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds, timer_method,
+             status_message, last_result=None, circle_enabled=True, tracker=None):
     height, width = frame.shape[:2]
     margin = max(12, int(min(width, height) * 0.014))
-    panel_w = min(max(330, int(width * 0.28)), width - margin * 2)
-    panel_h = 132 if not status_message else 158
+    panel_w = min(460, width - margin * 2)
+    panel_h = 258 if not status_message else 284
     x1 = margin
     y1 = margin
     x2 = x1 + panel_w
@@ -1235,6 +1327,13 @@ def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds,
     draw_alpha_rect(frame, x1, y1, x2, y2, bg, 0.78)
     cv2.rectangle(frame, (x1, y1), (x2, y2), border, 1)
     draw_text(frame, "AZUSA DETECTOR", x1 + 14, y1 + 24, 0.48, muted, 1)
+    toggle_rect = (x1 + 14, y1 + 34, x2 - 14, y1 + 64)
+    tx1, ty1, tx2, ty2 = toggle_rect
+    toggle_color = (54, 106, 62) if circle_enabled else (68, 75, 88)
+    draw_alpha_rect(frame, tx1, ty1, tx2, ty2, toggle_color, 0.95)
+    cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), green if circle_enabled else muted, 1)
+    toggle_label = f"Circle {'ON - judging' if circle_enabled else 'OFF - tracking only'}  [O / click]"
+    draw_text(frame, toggle_label, tx1 + 9, ty1 + 20, fit_text_scale(toggle_label, panel_w - 46), text)
 
     if session is not None:
         elapsed_time = (datetime.now() - session.start_time).total_seconds()
@@ -1260,29 +1359,46 @@ def draw_hud(frame, circle_radius, session, is_muted, auto_label, timer_seconds,
     elif "REC" in auto_text:
         auto_color = red
 
-    badge_y = y1 + 39
+    badge_y = y1 + 76
     next_x = draw_badge(frame, x1 + 14, badge_y, rec_text, rec_color)
     if next_x + 118 < x2:
         next_x = draw_badge(frame, next_x + 8, badge_y, auto_text, auto_color)
     if next_x + 94 < x2:
         draw_badge(frame, next_x + 8, badge_y, timer_text, (52, 62, 74))
 
-    row_y = y1 + 92
+    row_y = y1 + 126
     draw_text(frame, f"Radius {circle_radius}", x1 + 14, row_y, 0.52, text, 1)
     mute_label = "Muted ON" if is_muted else "Muted OFF"
     mute_color = (80, 96, 230) if is_muted else muted
     draw_text(frame, mute_label, x1 + 130, row_y, 0.52, mute_color, 1)
+    if tracker is not None:
+        tracking_label = "TRACKING" if tracker.detected else "NO DETECTION - holding last values"
+        draw_text(frame, tracking_label, x1 + 14, y1 + 151, 0.46, green if tracker.detected else accent)
+        position_text = "Position: -- (waiting for first detection)"
+        if tracker.relative is not None:
+            position_text = f"Position: X {tracker.relative[0]:+.1f}  Y {tracker.relative[1]:+.1f} px"
+        draw_text(frame, position_text, x1 + 14, y1 + 176, fit_text_scale(position_text, panel_w - 28), text)
+        delta_text = "Delta: -- (waiting for next detection)"
+        if tracker.delta is not None:
+            delta_text = f"Delta: X {tracker.delta[0]:+.1f}  Y {tracker.delta[1]:+.1f} px"
+        draw_text(frame, delta_text, x1 + 14, y1 + 201, fit_text_scale(delta_text, panel_w - 28), text)
+        gap_text = "Axes: right +X, down +Y"
+        if tracker.delta_seconds is not None:
+            gap_text += f"  |  dt {tracker.delta_seconds:.3f}s"
+        draw_text(frame, gap_text, x1 + 14, y1 + 222, 0.40, muted)
     if last_result is not None:
         # 결과 카드(3초)가 사라진 뒤에도 마지막 세션 결과를 항상 확인 가능
         grade_colors = {"GOOD": (92, 220, 126), "SOSO": (64, 202, 255), "BAD": (86, 118, 255)}
-        last_text = f"Last {last_result['grade']} {last_result['outside_ratio'] * 100:.1f}%"
-        draw_text(frame, last_text, x1 + 246, row_y, 0.52, grade_colors.get(last_result["grade"], muted), 1)
+        ratio = last_result["outside_ratio"]
+        last_text = f"Last {last_result['grade']}" + (f" {ratio * 100:.1f}%" if ratio is not None else " (no judged frames)")
+        draw_text(frame, last_text, x1 + 14, y1 + 244, 0.44, grade_colors.get(last_result["grade"], muted), 1)
 
     if status_message:
         status_scale = fit_text_scale(status_message, panel_w - 28, 0.48, 0.36)
-        draw_text(frame, status_message, x1 + 14, y1 + 125, status_scale, accent, 1)
+        draw_text(frame, status_message, x1 + 14, y1 + 271, status_scale, accent, 1)
 
     draw_shortcut_guide(frame, margin)
+    return toggle_rect
 
 
 def set_status(message):
@@ -1328,6 +1444,16 @@ def main(obs_window_title, game_window_title, config):
     is_muted = False
     was_outside = False
     circle_radius = config["detect"]["circle_radius"]
+    circle_enabled = config["detect"]["circle_enabled"]
+    tracker = PointTracker()
+    toggle_button = {"bounds": None, "clicked": False}
+
+    def on_display_mouse(event, mouse_x, mouse_y, flags, param):
+        bounds = toggle_button["bounds"]
+        if event == cv2.EVENT_LBUTTONUP and bounds is not None:
+            x1, y1, x2, y2 = bounds
+            if x1 <= mouse_x <= x2 and y1 <= mouse_y <= y2:
+                toggle_button["clicked"] = True
 
     timer_detector = TimerDetector(config)
     auto_state = AutoStateMachine(config)
@@ -1377,19 +1503,24 @@ def main(obs_window_title, game_window_title, config):
                 session = SessionRecorder(config, "auto")
                 status_message, status_message_until = set_status("Auto recording started")
 
-            circle_center = draw_circle(frame, initial_rectangle, circle_radius)
-            is_outside, white_point = check_white_point_outside_circle(
-                raw_frame, initial_rectangle, circle_center, circle_radius
-            )
+            if circle_enabled:
+                draw_circle(frame, initial_rectangle, circle_radius)
+            white_point = detect_white_point(raw_frame, initial_rectangle)
+            tracker.update(white_point, time.monotonic())
+            is_outside = judge_circle(white_point, initial_rectangle, circle_radius, circle_enabled)
+            if white_point is not None:
+                center = tuple(int(round(value)) for value in white_point)
+                cv2.drawMarker(frame, center, (255, 199, 82), cv2.MARKER_CROSS, 12, 1)
 
-            beep_event = is_outside and not was_outside
+            beep_event = is_outside is True and not was_outside
             if beep_event:
                 threading.Thread(target=play_alert_sound, args=(is_muted,)).start()
                 print("Outside detected")
-            was_outside = is_outside
+            if is_outside is not None:
+                was_outside = is_outside
 
             if session is not None:
-                session.add_frame(is_outside, white_point, initial_rectangle, beep_event)
+                session.add_frame(is_outside, white_point, initial_rectangle, beep_event, tracker, circle_enabled)
 
             finish_reason = auto_state.maybe_finish(
                 timer_seconds,
@@ -1407,7 +1538,7 @@ def main(obs_window_title, game_window_title, config):
         if now >= status_message_until:
             status_message = ""
 
-        draw_hud(
+        toggle_button["bounds"] = draw_hud(
             frame,
             circle_radius,
             session,
@@ -1417,6 +1548,8 @@ def main(obs_window_title, game_window_title, config):
             timer_method,
             status_message,
             last_result,
+            circle_enabled,
+            tracker,
         )
 
         if time.time() < result_overlay_until:
@@ -1424,6 +1557,7 @@ def main(obs_window_title, game_window_title, config):
 
         if not display_window_initialized:
             initialize_display_window(frame)
+            cv2.setMouseCallback(DISPLAY_WINDOW_NAME, on_display_mouse)
             display_window_initialized = True
 
         cv2.imshow(DISPLAY_WINDOW_NAME, frame)
@@ -1437,6 +1571,17 @@ def main(obs_window_title, game_window_title, config):
                 auto_state.record_stopped(last_result, time.time())
                 session = None
             break
+        if key == ord("o") or toggle_button["clicked"]:
+            toggle_button["clicked"] = False
+            circle_enabled = not circle_enabled
+            config["detect"]["circle_enabled"] = circle_enabled
+            save_config(config)
+            was_outside = False
+            if not circle_enabled and session is not None:
+                session.close_outside_interval((datetime.now() - session.start_time).total_seconds())
+            status_message, status_message_until = set_status(
+                f"Circle judging {'ON' if circle_enabled else 'OFF - tracking continues'}"
+            )
         if key in (ord("+"), ord("=")):
             circle_radius += 1
             config["detect"]["circle_radius"] = circle_radius
