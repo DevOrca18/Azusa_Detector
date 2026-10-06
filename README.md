@@ -71,7 +71,7 @@ Missing required sources and invalid active settings are highlighted. The start 
 
 | Mode | Settings | Behavior |
 | --- | --- | --- |
-| Position tracking — default | Separate X/Y or total distance, beep, measurement guide | Compare the current valid detection with the previous valid detection |
+| Position tracking — default | Separate X/Y or total distance, beep, measurement guide | Compare adjacent detected frames; restart the movement reference after any missed frame |
 | Circle judging | Radius, GOOD/SOSO limits, beep | Judge and grade movement outside a circle with a fixed center in the black area |
 
 **Position tracking**
@@ -104,11 +104,12 @@ If the sample is playing, the app switches to the selected OBS source.
 
 **Position references and missing detections**
 
-The first valid detection defines position `(0, 0)`. Each movement value compares two consecutive valid detections.
-For `A → missing → missing → B`, the next movement is `B − A`; a missing interval does not make the next detection automatically safe.
-If that movement reaches the threshold, it triggers an alert.
+The first valid detection defines position `(0, 0)`. Movement is calculated only between adjacent detected frames.
+Any missing frame clears the movement reference and the previous movement warning. The first reacquired point establishes a new reference without a Delta calculation or movement alert.
+For `A → missing → B → C`, B is the new reference and the next movement is `C − B`. B is never compared with A, even if only one frame was missed. This applies to both separate X/Y and total-distance thresholds.
 
-Missing frames have blank coordinate fields in the CSV. Starting or stopping a recording does not reset the position reference.
+Missing frames have blank coordinate fields in the CSV. Reacquired frames keep their detected position, but Delta, movement interval, distance, and movement judgment are blank. The position origin stays unchanged across gaps.
+Starting or stopping a recording does not reset the position reference.
 Starting a new monitoring run, requesting redetection, or changing the input dimensions resets it.
 
 ### 5. View recordings and activity

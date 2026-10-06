@@ -88,7 +88,7 @@ class MonitorEngine:
 
     def missing(self, now):
         self.check_deadline(now)
-        self.guide_origin = self.tracker.last_point
+        self.guide_origin = None
         self.timer_frame = None
         self.tracker.update(None, now)
         self.feedback.update(None, False, now)
@@ -139,8 +139,8 @@ class MonitorEngine:
             else:
                 self.log("자동 기록 시작")
         point = app.detect_white_point(raw, self.rectangle) if self.rectangle else None
-        # Capture the previous valid point before update; gaps never reset it.
-        self.guide_origin = self.tracker.last_point or point
+        # After a gap, the guide starts at the new point instead of a stale one.
+        self.guide_origin = (self.tracker.last_point or point) if point is not None else None
         self.tracker.update(point, now)
         delta_event = self.feedback.update(self.tracker.delta, self.tracker.detected, now)
         circle = self.config["detect"]["circle_enabled"]

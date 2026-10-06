@@ -49,7 +49,11 @@ class DeltaFeedback:
         self.last_alert_delta = None
 
     def update(self, delta, detected, now):
-        self.over_threshold = delta_exceeded(delta if detected else None, self.config)
+        if not detected or delta is None:
+            self.over_threshold = None
+            self.last_alert_delta = None
+            return False
+        self.over_threshold = delta_exceeded(delta, self.config)
         # At most one sound per second; every over-threshold sample is still logged.
         event = self.over_threshold is True and now - self.last_event_at >= 1.0
         if event:
@@ -58,7 +62,7 @@ class DeltaFeedback:
         return event
 
     def visible(self, now):
-        return self.config["enabled"] and now - self.last_event_at < 0.8
+        return self.config["enabled"] and self.last_alert_delta is not None and now - self.last_event_at < 0.8
 
 
 def preview_transform(canvas_width, canvas_height, source_width, source_height):

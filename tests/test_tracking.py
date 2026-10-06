@@ -24,7 +24,7 @@ class TrackingTests(unittest.TestCase):
             cv2.circle(frame, point, 3, (255, 255, 255), -1)
         return frame
 
-    def test_missing_frames_compare_next_detection_to_last_valid_point(self):
+    def test_missing_frames_clear_delta_reference_but_preserve_position_origin(self):
         tracker = app.PointTracker()
         tracker.update(None, 0.0)
         self.assertIsNone(tracker.origin)
@@ -32,21 +32,30 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(tracker.relative, (0.0, 0.0))
         self.assertIsNone(tracker.delta)
         tracker.update((110.0, 105.0), 2.0)
+        self.assertEqual(tracker.delta, (10.0, 5.0))
         tracker.update(None, 3.0)
         tracker.update(None, 4.0)
         self.assertFalse(tracker.detected)
-        self.assertEqual(tracker.last_point, (110.0, 105.0))
-        self.assertEqual(tracker.delta, (10.0, 5.0))
+        self.assertIsNone(tracker.last_point)
+        self.assertIsNone(tracker.last_seen_at)
+        self.assertIsNone(tracker.delta)
+        self.assertIsNone(tracker.delta_seconds)
         tracker.update((107.0, 112.0), 5.0)
         self.assertEqual(tracker.relative, (7.0, 12.0))
-        self.assertEqual(tracker.delta, (-3.0, 7.0))
-        self.assertEqual(tracker.delta_seconds, 3.0)
+        self.assertEqual(tracker.last_point, (107.0, 112.0))
+        self.assertIsNone(tracker.delta)
+        self.assertIsNone(tracker.delta_seconds)
+        tracker.update((114.0, 107.0), 6.0)
+        self.assertEqual(tracker.delta, (7.0, -5.0))
+        self.assertEqual(tracker.delta_seconds, 1.0)
 
     def test_zero_coordinate_is_a_valid_reference(self):
         tracker = app.PointTracker()
         tracker.update((0.0, 0.0), 0.0)
         tracker.update(None, 1.0)
-        tracker.update((2.0, 3.0), 2.0)
+        tracker.update((0.0, 0.0), 2.0)
+        self.assertIsNone(tracker.delta)
+        tracker.update((2.0, 3.0), 3.0)
         self.assertEqual(tracker.delta, (2.0, 3.0))
 
     def test_windowless_build_does_not_hide_another_app(self):
@@ -89,11 +98,13 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual((result["total_frames"], result["detected_frames"], result["graded_frames"]), (4, 3, 2))
         self.assertEqual(result["outside_ratio"], 0.5)
         self.assertEqual(tracker.relative, (70, 0))
-        self.assertEqual(tracker.delta, (10, 0))
-        self.assertEqual(tracker.delta_seconds, 2.0)
+        self.assertIsNone(tracker.delta)
+        self.assertIsNone(tracker.delta_seconds)
         self.assertEqual(recorder.data[1][8:12], [60, 0, 60, 0])
         self.assertEqual(recorder.data[2][2:4], [None, None])
         self.assertEqual(recorder.data[2][8:13], [None] * 5)
+        self.assertEqual(recorder.data[3][8:10], [70, 0])
+        self.assertEqual(recorder.data[3][10:14], [None] * 4)
 
     def test_unjudged_session_has_no_grade_and_can_be_rendered_and_saved(self):
         recorder = app.SessionRecorder(self.config, "manual")

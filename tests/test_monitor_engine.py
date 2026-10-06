@@ -37,7 +37,7 @@ class MonitorEngineTests(unittest.TestCase):
         record.assert_not_called()
         hud.assert_not_called()
 
-    def test_large_reappearance_compares_with_last_valid_and_warns(self):
+    def test_large_reappearance_establishes_reference_and_next_frame_can_warn(self):
         self.engine.start(self.config)
         self.engine.record()
         with patch.object(app, "play_alert_sound", return_value=True) as sound:
@@ -45,21 +45,76 @@ class MonitorEngineTests(unittest.TestCase):
             self.engine.step(self.frame(), None, 2)
             self.engine.missing(3)
             self.engine.step(self.frame((130, 80)), None, 4)
-        self.assertEqual(self.engine.tracker.delta, (30, -20))
-        self.assertEqual(self.engine.tracker.delta_seconds, 3)
+            self.assertIsNone(self.engine.tracker.delta)
+            self.assertIsNone(self.engine.tracker.delta_seconds)
+            self.assertIsNone(self.engine.feedback.over_threshold)
+            self.assertEqual(self.engine.guide_origin, (130, 80))
+            self.assertFalse(self.engine.alerting(4))
+            sound.assert_not_called()
+            self.assertEqual(self.engine.session.data[-1][10:14], [None] * 4)
+            self.engine.step(self.frame((155, 80)), None, 5)
+        self.assertEqual(self.engine.tracker.delta, (25, 0))
+        self.assertEqual(self.engine.tracker.delta_seconds, 1)
         self.assertTrue(self.engine.feedback.over_threshold)
         sound.assert_called_once()
-        self.assertEqual(self.engine.session.data[-1][10:13], [30, -20, 3])
-        self.assertEqual([row[-1] for row in self.engine.session.data], [None, None, None, True])
+        self.assertEqual(self.engine.session.data[-1][10:13], [25, 0, 1])
+        self.assertEqual([row[-1] for row in self.engine.session.data], [None, None, None, None, True])
 
-    def test_small_reappearance_is_safe_because_delta_is_small(self):
+    def test_small_reappearance_also_skips_delta_then_resumes_comparison(self):
         self.engine.start(self.config)
         with patch.object(app, "play_alert_sound", return_value=True) as sound:
             for now, point in enumerate(((100, 100), None, (102, 103))):
                 self.engine.step(self.frame(point), None, now)
-        self.assertEqual(self.engine.tracker.delta, (2, 3))
+            self.assertIsNone(self.engine.tracker.delta)
+            self.assertIsNone(self.engine.feedback.over_threshold)
+            self.engine.step(self.frame((103, 105)), None, 3)
+        self.assertEqual(self.engine.tracker.delta, (1, 2))
         self.assertFalse(self.engine.feedback.over_threshold)
         sound.assert_not_called()
+
+    def test_single_missing_frame_or_capture_restarts_both_delta_methods(self):
+        for method in ("axes", "distance"):
+            for capture_lost in (False, True):
+                with self.subTest(method=method, capture_lost=capture_lost):
+                    config = deepcopy(self.config)
+                    config["delta_feedback"]["method"] = method
+                    engine = MonitorEngine(app, config)
+                    engine.start(config)
+                    with patch.object(app, "play_alert_sound", return_value=True) as sound:
+                        engine.step(self.frame((100, 100)), None, 1)
+                        if capture_lost:
+                            engine.missing(2)
+                        else:
+                            engine.step(self.frame(), None, 2)
+                        self.assertIsNone(engine.tracker.delta)
+                        self.assertFalse(engine.alerting(2))
+                        engine.step(self.frame((160, 80)), None, 3)
+                        self.assertIsNone(engine.tracker.delta)
+                        self.assertIsNone(engine.feedback.over_threshold)
+                        sound.assert_not_called()
+                        engine.step(self.frame((180, 80)), None, 4)
+                        self.assertEqual(engine.tracker.delta, (20, 0))
+                        self.assertTrue(engine.feedback.over_threshold)
+                        sound.assert_called_once()
+
+    def test_repeated_loss_never_reuses_an_old_delta_or_alert(self):
+        self.engine.start(self.config)
+        with patch.object(app, "play_alert_sound", return_value=True) as sound:
+            self.engine.step(self.frame((100, 100)), None, 0)
+            self.engine.step(self.frame((130, 100)), None, 1)
+            self.assertTrue(self.engine.alerting(1))
+            self.engine.step(self.frame(), None, 1.1)
+            self.assertFalse(self.engine.alerting(1.1))
+            self.engine.step(self.frame((180, 80)), None, 1.2)
+            self.assertFalse(self.engine.alerting(1.2))
+            self.assertIsNone(self.engine.tracker.delta)
+            self.engine.missing(2)
+            self.engine.step(self.frame((100, 130)), None, 3)
+            self.assertIsNone(self.engine.feedback.over_threshold)
+            self.assertIsNone(self.engine.feedback.last_alert_delta)
+            self.engine.step(self.frame((102, 132)), None, 4)
+            self.assertEqual(self.engine.tracker.delta, (2, 2))
+            sound.assert_called_once()
 
     def test_live_threshold_edit_keeps_reference_and_logs_new_limits(self):
         self.engine.start(self.config)
