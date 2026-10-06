@@ -886,7 +886,7 @@ def judge_circle(point, rect, radius, enabled):
 
 
 class PointTracker:
-    """Compare consecutive valid detections, retaining the reference across gaps."""
+    """Compare uninterrupted detections; a gap requires a new delta reference."""
 
     def __init__(self):
         self.origin = None
@@ -899,7 +899,11 @@ class PointTracker:
 
     def update(self, point, now):
         self.detected = point is not None
+        self.delta = None
+        self.delta_seconds = None
         if point is None:
+            self.last_point = None
+            self.last_seen_at = None
             return
         if self.origin is None:
             self.origin = point

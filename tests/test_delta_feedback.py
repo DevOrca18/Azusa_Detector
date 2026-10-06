@@ -47,6 +47,19 @@ class DeltaFeedbackTests(unittest.TestCase):
         feedback.config["enabled"] = False
         self.assertFalse(feedback.visible(1.1))
 
+    def test_gap_and_reference_only_frame_clear_old_warning_without_new_sound(self):
+        feedback = DeltaFeedback(self.config)
+        self.assertTrue(feedback.update((20, 0), True, 1.0))
+        self.assertTrue(feedback.visible(1.1))
+        self.assertFalse(feedback.update(None, False, 1.2))
+        self.assertIsNone(feedback.over_threshold)
+        self.assertIsNone(feedback.last_alert_delta)
+        self.assertFalse(feedback.visible(1.2))
+        self.assertFalse(feedback.update(None, True, 1.3))
+        self.assertFalse(feedback.visible(1.3))
+        self.assertIsNone(feedback.over_threshold)
+        self.assertTrue(feedback.update((-30, 0), True, 2.0))
+
     def test_old_configs_default_off_and_invalid_limits_are_repaired(self):
         old, warnings = app.validate_config({})
         self.assertFalse(old["delta_feedback"]["enabled"])
@@ -83,6 +96,8 @@ class DeltaFeedbackTests(unittest.TestCase):
         tracker.update((10, 10), 0)
         tracker.update(None, 1)
         tracker.update((30, 5), 2)
+        self.assertIsNone(delta_exceeded(tracker.delta, self.config))
+        tracker.update((50, 0), 3)
         over = delta_exceeded(tracker.delta, self.config)
         recorder.add_frame(None, tracker.last_point, (0, 0, 486, 274), True, tracker, False, over)
         result = recorder.finish()

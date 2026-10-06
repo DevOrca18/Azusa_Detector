@@ -54,8 +54,11 @@ def run_self_check(app):
             tracker.update(point, 1.0)
             tracker.update(None, 2.0)
             tracker.update((115.0, 73.0), 3.0)
-            if tracker.delta != (15.0, -7.0) or tracker.delta_seconds != 2.0:
-                raise RuntimeError("Tracking across missed frames failed")
+            if tracker.delta is not None or tracker.delta_seconds is not None:
+                raise RuntimeError("Reacquired point must only establish a new reference")
+            tracker.update((120.0, 75.0), 4.0)
+            if tracker.delta != (5.0, 2.0) or tracker.delta_seconds != 1.0:
+                raise RuntimeError("Tracking did not resume from the new reference")
             recorder = app.SessionRecorder(config, "manual")
             recorder.add_frame(None, tracker.last_point, (0, 0, 200, 160), False, tracker, False)
             result = app.finish_recording(recorder, (0, 0, 200, 160))
